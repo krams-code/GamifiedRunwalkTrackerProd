@@ -27,8 +27,8 @@ service cloud.firestore {
     // ONE map of item prices. Build it once per request (with `let`): Firestore
     // stops a request after 1,000 evaluated expressions, and building this
     // ~100-item map seven times went over that, so every item purchase was
-    // refused. '' = an empty slot (price 0).
-    function itemPrices() { return {'cap_red': 0, 'beanie_blue': 0, 'ears_cat': 120, 'wizard_hat': 0, 'helm_knight': 0, 'halo': 400, 'crown_gold': 0, 'sweatband': 60, 'bucket_hat': 150, 'beret': 180, 'tophat': 350, 'viking': 500, 'pirate_hat': 800, 'crown_ice': 1200, 'crown_royal': 2800, 'stache': 60, 'glasses_round': 80, 'shades': 150, 'mask_hero': 0, 'freckles': 50, 'blush': 60, 'bandage': 70, 'glasses_nerd': 120, 'goggles_swim': 160, 'eyepatch': 280, 'beard': 350, 'visor_cyber': 500, 'shades_star': 700, 'mask_masq': 1000, 'shades_diamond': 2200, 'tee_stripes': 100, 'hoodie_orange': 0, 'jersey_bolt': 200, 'gi_ninja': 350, 'armor_silver': 0, 'armor_gold': 0, 'tee_lime': 80, 'polo_navy': 140, 'tank_sport': 180, 'flannel': 300, 'varsity': 450, 'track_retro': 500, 'robe_star': 900, 'armor_crystal': 1200, 'armor_dragon': 2500, 'shorts_red': 0, 'pants_track': 120, 'pants_camo': 250, 'shorts_gold': 0, 'shorts_denim': 70, 'shorts_gym': 90, 'jeans': 150, 'pants_khaki': 180, 'joggers': 280, 'shorts_board': 320, 'pants_plaid': 450, 'hakama': 750, 'leggings_galaxy': 1100, 'greaves': 1300, 'pants_royal': 2200, 'sneak_red': 0, 'runners_neon': 0, 'boots_gold': 450, 'wing_shoes': 600, 'rocket_boots': 0, 'slides': 60, 'sneak_blue': 70, 'sneak_white': 100, 'hightops': 180, 'boots_hiking': 300, 'cleats': 400, 'sneak_flame': 550, 'boots_frost': 900, 'sneak_galaxy': 1200, 'boots_dragon': 2400, 'cape_red': 0, 'backpack': 130, 'wings_bat': 0, 'wings_angel': 800, 'sling_bag': 90, 'backpack_school': 150, 'quiver': 200, 'cape_night': 300, 'surfboard': 380, 'wings_butterfly': 550, 'shield_round': 750, 'wings_fairy': 900, 'jetpack': 1100, 'cape_royal': 2000, 'scarf_red': 0, 'medal_gold': 0, 'belt_champ': 0, 'tie_red': 60, 'bowtie': 80, 'bandana': 100, 'whistle': 120, 'scarf_cozy': 150, 'dogtags': 250, 'neckphones': 380, 'pearls': 450, 'chain_gold': 700, 'amulet': 1000, 'medallion': 1300, 'collar_diamond': 2500, 'wavy_mane': 0, 'neutral': 0, 'outfit_01_default_starter_set': 0, '': 0}; }
+    // refused. (No empty-text keys: Firestore refuses them.)
+    function itemPrices() { return {'cap_red': 0, 'beanie_blue': 0, 'ears_cat': 120, 'wizard_hat': 0, 'helm_knight': 0, 'halo': 400, 'crown_gold': 0, 'sweatband': 60, 'bucket_hat': 150, 'beret': 180, 'tophat': 350, 'viking': 500, 'pirate_hat': 800, 'crown_ice': 1200, 'crown_royal': 2800, 'stache': 60, 'glasses_round': 80, 'shades': 150, 'mask_hero': 0, 'freckles': 50, 'blush': 60, 'bandage': 70, 'glasses_nerd': 120, 'goggles_swim': 160, 'eyepatch': 280, 'beard': 350, 'visor_cyber': 500, 'shades_star': 700, 'mask_masq': 1000, 'shades_diamond': 2200, 'tee_stripes': 100, 'hoodie_orange': 0, 'jersey_bolt': 200, 'gi_ninja': 350, 'armor_silver': 0, 'armor_gold': 0, 'tee_lime': 80, 'polo_navy': 140, 'tank_sport': 180, 'flannel': 300, 'varsity': 450, 'track_retro': 500, 'robe_star': 900, 'armor_crystal': 1200, 'armor_dragon': 2500, 'shorts_red': 0, 'pants_track': 120, 'pants_camo': 250, 'shorts_gold': 0, 'shorts_denim': 70, 'shorts_gym': 90, 'jeans': 150, 'pants_khaki': 180, 'joggers': 280, 'shorts_board': 320, 'pants_plaid': 450, 'hakama': 750, 'leggings_galaxy': 1100, 'greaves': 1300, 'pants_royal': 2200, 'sneak_red': 0, 'runners_neon': 0, 'boots_gold': 450, 'wing_shoes': 600, 'rocket_boots': 0, 'slides': 60, 'sneak_blue': 70, 'sneak_white': 100, 'hightops': 180, 'boots_hiking': 300, 'cleats': 400, 'sneak_flame': 550, 'boots_frost': 900, 'sneak_galaxy': 1200, 'boots_dragon': 2400, 'cape_red': 0, 'backpack': 130, 'wings_bat': 0, 'wings_angel': 800, 'sling_bag': 90, 'backpack_school': 150, 'quiver': 200, 'cape_night': 300, 'surfboard': 380, 'wings_butterfly': 550, 'shield_round': 750, 'wings_fairy': 900, 'jetpack': 1100, 'cape_royal': 2000, 'scarf_red': 0, 'medal_gold': 0, 'belt_champ': 0, 'tie_red': 60, 'bowtie': 80, 'bandana': 100, 'whistle': 120, 'scarf_cozy': 150, 'dogtags': 250, 'neckphones': 380, 'pearls': 450, 'chain_gold': 700, 'amulet': 1000, 'medallion': 1300, 'collar_diamond': 2500, 'wavy_mane': 0, 'neutral': 0, 'outfit_01_default_starter_set': 0}; }
     function heroCoins(id) { return {'sprout': 0, 'frog': 0, 'penguin': 0, 'slime': 0, 'bear': 300, 'cat': 300, 'fox': 400, 'panda': 400, 'dino': 500, 'ghost': 0, 'shroom': 0, 'pirate': 0, 'ninja': 0, 'knight': 0, 'astronaut': 0, 'wizard': 1000, 'mech': 1200, 'dragon': 1500, 'alien': 0, 'flame': 0}.get(id, 999999999); }
     // earned heroes that need a cleared rank: hero id -> stage id
     function heroStage(id) { return {'ninja': 'stage_novice', 'knight': 'stage_vanguard', 'flame': 'stage_slayer'}.get(id, ''); }
@@ -127,7 +127,9 @@ service cloud.firestore {
         && c.status == 'done'
         && get(path).data.status != 'done'
         // a win by default pays only the share of the distance actually run
-        && delta('coins') <= c.reward * math.min(1.0, c.progress[uid] / c.distance_km)
+        // (the rules language has no min(): written as a comparison)
+        && delta('coins') <= c.reward * (c.progress[uid] >= c.distance_km
+                                           ? 1.0 : c.progress[uid] / c.distance_km)
         && delta('coins') <= c.get('prize', 0)
         && dailyCoinsOk()
         // at most 3 paid duel wins per day (Manila day)
@@ -160,15 +162,17 @@ service cloud.firestore {
     // weekly pick is 25% off: pay at least 75% of the price
     function minPay(v) { return math.floor(v * 0.75); }
 
-    // Price of the (up to 7) NEW items at the tail of the list. The list is
-    // padded with '' so every index exists, and the price map is built once.
+    // Price of the (up to 7) NEW items at the tail of the list. The price
+    // map is built ONCE (let) and each slot is read only if it exists.
     function itemCoinsMin(ni, k) {
       let m = itemPrices();
-      let p = ni.concat(['', '', '', '', '', '', '']);
-      return minPay(m.get(p[k], 999999999)) + minPay(m.get(p[k + 1], 999999999))
-           + minPay(m.get(p[k + 2], 999999999)) + minPay(m.get(p[k + 3], 999999999))
-           + minPay(m.get(p[k + 4], 999999999)) + minPay(m.get(p[k + 5], 999999999))
-           + minPay(m.get(p[k + 6], 999999999));
+      return minPay(k < ni.size() ? m.get(ni[k], 999999999) : 0)
+           + minPay(k + 1 < ni.size() ? m.get(ni[k + 1], 999999999) : 0)
+           + minPay(k + 2 < ni.size() ? m.get(ni[k + 2], 999999999) : 0)
+           + minPay(k + 3 < ni.size() ? m.get(ni[k + 3], 999999999) : 0)
+           + minPay(k + 4 < ni.size() ? m.get(ni[k + 4], 999999999) : 0)
+           + minPay(k + 5 < ni.size() ? m.get(ni[k + 5], 999999999) : 0)
+           + minPay(k + 6 < ni.size() ? m.get(ni[k + 6], 999999999) : 0);
     }
     function heroCoinsMin(nh, k) { return k < nh.size() ? heroCoins(nh[k]) : 0; }
     function heroUnlockedByRank(nh, k) {
@@ -265,6 +269,85 @@ service cloud.firestore {
                 && heroUnlockedByRank(nd('owned_heroes', []), od('owned_heroes', []).size())));
     }
 
+    // CHARACTER CREATION ("BEGIN YOUR JOURNEY"): the hero is set up once.
+    // Kept separate and simple so it never depends on the economy check:
+    // no coins / XP / km / runs / ranks change, the hero is a free starter,
+    // and any new items are free.
+    function creationOk() {
+      return od('character_created', true) == false
+        && nd('coins', 0) == od('coins', 0)
+        && nd('xp', 0) == od('xp', 0)
+        && nd('total_km', 0) == od('total_km', 0)
+        && nd('total_sessions', 0) == od('total_sessions', 0)
+        && nd('gems', 0) == od('gems', 0)
+        && !changed('stage_records')
+        && noPrivateFields()
+        && nd('owned_heroes', []).hasAll(od('owned_heroes', []))
+        && nd('owned_heroes', []).size() <= od('owned_heroes', []).size() + 1
+        && (nd('owned_heroes', []).size() == od('owned_heroes', []).size()
+            || (heroCoins(nd('owned_heroes', [])[od('owned_heroes', []).size()]) == 0
+                && heroStage(nd('owned_heroes', [])[od('owned_heroes', []).size()]) == ''
+                && heroMinXp(nd('owned_heroes', [])[od('owned_heroes', []).size()]) == 0))
+        && nd('owned_items', []).hasAll(od('owned_items', []))
+        && nd('owned_items', []).size() <= od('owned_items', []).size() + 3
+        && itemCoinsMin(nd('owned_items', []), od('owned_items', []).size()) == 0;
+    }
+
+    // ── SHORT, DEDICATED CHECKS for everyday saves ──
+    // Each one names exactly which fields the save may touch (affectedKeys)
+    // and checks only those, so these saves never depend on the long
+    // economy check (runs, duels, ranks) above.
+    function keys() { return request.resource.data.diff(resource.data).affectedKeys(); }
+
+    // Fields with no coin / XP / rank value: outfit, hero choice, "seen"
+    // badges, tutorial flags, gender, username key, blocked list.
+    function cosmeticOk() {
+      return keys().hasOnly(['hero_outfit', 'hero_id', 'stage_seen', 'tutorial_done',
+                             'has_completed_first_run_tutorial', 'gender',
+                             'username_key', 'blocked_uids']);
+    }
+
+    // SHOP: buy items and / or one hero, pay at least the catalog price
+    // (weekly pick: 75%), and wear them. Nothing else may change.
+    function purchaseOk() {
+      return keys().hasOnly(['coins', 'owned_items', 'owned_heroes', 'hero_id', 'hero_outfit'])
+        && nd('coins', 0) >= 0
+        && delta('coins') <= 0
+        && ownershipOk();
+    }
+
+    // DAILY STREAK GIFT (once per 12 h) and WEEKLY GOAL GIFT (once a week)
+    function streakClaimOk() {
+      return keys().hasOnly(['coins', 'streak_claims', 'streak_claim_at'])
+        && delta('coins') >= 0
+        && streakOk();
+    }
+    function weeklyClaimOk() {
+      return keys().hasOnly(['coins', 'weekly_goal_claimed', 'weekly_claim_at',
+                             'weekly_claim_week', 'weekly_goal_log'])
+        && delta('coins') >= 0
+        && weeklyOk();
+    }
+
+    // WEEKLY BODY CHECK-IN (form + endurance bonus, +10 per evolution)
+    function checkInSaveOk() {
+      return keys().hasOnly(['body_tier', 'best_composition_rank', 'last_checkin_at',
+                             'endurance_bonus'])
+        && nd('last_checkin_at', null) == request.time
+        && checkInOk()
+        && delta('endurance_bonus') >= 0 && delta('endurance_bonus') <= 10;
+    }
+
+    // old crystals cashed in once (1 crystal = 10 coins)
+    function migrateSaveOk() {
+      return keys().hasOnly(['coins', 'gems']) && migrateOk();
+    }
+
+    function everydayOk() {
+      return cosmeticOk() || purchaseOk() || streakClaimOk() || weeklyClaimOk()
+        || checkInSaveOk() || migrateSaveOk();
+    }
+
     // a new account starts with the sign-up gift only
     function freshAccount() {
       return nd('coins', 0) <= 100 && nd('gems', 0) == 0
@@ -288,7 +371,8 @@ service cloud.firestore {
         // moving time can't be longer than the distance walked at 1.5 km/h
         // (+2 min), so standing still earns no time XP
         && a.xpEarned <= (a.distanceKm * 100
-             + math.min(a.durationSeconds, a.distanceKm / 1.5 * 3600 + 120) / 60.0 * 5)
+             + (a.durationSeconds < a.distanceKm / 1.5 * 3600 + 120
+                  ? a.durationSeconds : a.distanceKm / 1.5 * 3600 + 120) / 60.0 * 5)
              * 1.3 * 3.5 + 300;
     }
 
@@ -310,6 +394,11 @@ service cloud.firestore {
     }
     // this write is a weekly check-in: the public doc gets last_checkin_at =
     // now in the same batch, and the previous one is 6+ days old
+    // the hero is still being created (first values, or a retry after a
+    // failed attempt): height / weight may be set freely
+    function stillCreating(uid) {
+      return get(userDoc(uid)).data.get('character_created', true) == false;
+    }
     // one-time move of an old account's height / weight off the public doc
     function movedFromPublic(uid) {
       return 'weight_kg' in get(userDoc(uid)).data
@@ -327,7 +416,9 @@ service cloud.firestore {
     match /users/{uid} {
       allow read: if signedIn();                 // leaderboard + friend profiles
       allow create: if isMe(uid) && freshAccount();
-      allow update: if isMe(uid) && (heroSwitchOk() || economyOk(uid) || isTester());
+      allow update: if isMe(uid)
+        && (heroSwitchOk() || creationOk() || everydayOk()
+            || isTester() || economyOk(uid));
       allow delete: if isMe(uid);
 
       // email / height / weight: only the player can read or write them.
@@ -340,11 +431,13 @@ service cloud.firestore {
           && ((request.resource.data.get('weight_kg', null) == null
                 && request.resource.data.get('height_cm', null) == null)
               || !('last_checkin_at' in get(userDoc(uid)).data)
+              || stillCreating(uid)
               || movedFromPublic(uid)
               || checkInNow(uid));
         allow update: if isMe(uid) && bodyRangesOk()
           && (!privBodyChanged()
               || resource.data.get('weight_kg', null) == null
+              || stillCreating(uid)
               || movedFromPublic(uid)
               || checkInNow(uid));
       }

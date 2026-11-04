@@ -1,3 +1,4 @@
+import 'quick_get.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:hakbanghero/models/activity_model.dart';
 import 'weekly.dart';
@@ -16,13 +17,12 @@ class ActivitySnapshot {
 
   static Future<ActivitySnapshot> load(String uid) async {
     try {
-      final snap = await FirebaseFirestore.instance
+      final snap = await quickQuery(FirebaseFirestore.instance
           .collection('users')
           .doc(uid)
           .collection('activities')
           .orderBy('startTime', descending: true)
-          .limit(120)
-          .get();
+          .limit(120));
 
       final sessions = <ActivitySession>[];
       for (final d in snap.docs) {

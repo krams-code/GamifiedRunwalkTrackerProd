@@ -113,7 +113,8 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
           .orderBy('month_km', descending: true),
       _ => users.orderBy('xp', descending: true),
     };
-    return _boards[idx] = q.limit(100).get();
+    // never spin forever: after 12 s the board shows "pull down to try again"
+    return _boards[idx] = q.limit(100).get().timeout(const Duration(seconds: 12));
   }
   String _genderFilter = 'all';
 

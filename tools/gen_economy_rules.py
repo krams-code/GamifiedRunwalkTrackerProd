@@ -115,7 +115,6 @@ def dart_map(d, fmt=lambda v: v):
     return '{' + ', '.join("'%s': %s" % (k, fmt(v)) for k, v in d.items()) + '}'
 
 item_coins = dict(items)
-item_coins[''] = 0  # empty slot in the padded new-items list
 stage_map = '{' + ', '.join("'%s': [%s, %d]" % (k, num(v[0]), v[1]) for k, v in targets.items()) + '}'
 hero_stage_map = dart_map(hero_stage, lambda v: "'%s'" % v)
 

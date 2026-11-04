@@ -1,3 +1,4 @@
+import '../utils/quick_get.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
@@ -19,7 +20,7 @@ abstract final class PrivateData {
 
   static Future<Map<String, dynamic>> load(String uid) async {
     try {
-      return (await ref(uid).get()).data() ?? <String, dynamic>{};
+      return (await quickDoc(ref(uid))).data() ?? <String, dynamic>{};
     } catch (e) {
       debugPrint('private data read: $e');
       return <String, dynamic>{};

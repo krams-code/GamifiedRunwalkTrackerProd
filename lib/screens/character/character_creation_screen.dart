@@ -1,3 +1,4 @@
+import '../../widgets/game_notice.dart';
 import 'dart:async';
 import 'package:hakbanghero/services/private_data.dart';
 
@@ -224,6 +225,10 @@ class _CharacterCreationScreenState extends State<CharacterCreationScreen> {
       created: true,
     );
 
+    // The app root stays on screen even if this screen is swapped out while
+    // saving (the profile listener can switch to the app before the server
+    // answers), so a refused save is always shown to the player.
+    final rootCtx = Navigator.of(context, rootNavigator: true).context;
     try {
       final fields = profile.toFirestore();
       // height / weight are private: never on the public user doc
@@ -234,10 +239,14 @@ class _CharacterCreationScreenState extends State<CharacterCreationScreen> {
       if (widget.isEditMode) {
         // weight and height only change through the weekly check-in
         fields.remove('body_tier');
-      } else {
-        await PrivateData.ref(uid).set(body, SetOptions(merge: true));
       }
-      await FirebaseFirestore.instance.collection('users').doc(uid).update({
+      // ONE save: private height / weight and the hero land together, or not
+      // at all (no half-created account)
+      final batch = FirebaseFirestore.instance.batch();
+      if (!widget.isEditMode) {
+        batch.set(PrivateData.ref(uid), body, SetOptions(merge: true));
+      }
+      batch.update(FirebaseFirestore.instance.collection('users').doc(uid), {
         ...fields,
         if (!widget.isEditMode) ...{
           // creating the hero counts as the first weekly check-in
@@ -254,6 +263,7 @@ class _CharacterCreationScreenState extends State<CharacterCreationScreen> {
           TutorialProgress.firstRunField: false,
         },
       });
+      await batch.commit();
       if (!widget.isEditMode && body['weight_kg'] is num) {
         // first point of the weight chart (best effort)
         FirebaseFirestore.instance
@@ -279,7 +289,12 @@ class _CharacterCreationScreenState extends State<CharacterCreationScreen> {
       }
     } catch (e) {
       debugPrint('character save failed: $e');
-      _snack(saveErrorText(e, 'Failed to save character.'));
+      final msg = saveErrorText(e, 'Failed to save character.');
+      if (mounted) {
+        _snack(msg);
+      } else if (rootCtx.mounted) {
+        showGameAlert(rootCtx, title: 'HERO NOT SAVED', message: msg);
+      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }

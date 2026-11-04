@@ -1,3 +1,4 @@
+import '../utils/quick_get.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'game_notice.dart';
 import 'reward_popup.dart';
@@ -38,7 +39,7 @@ class _WeeklyGoalCardState extends State<WeeklyGoalCard> {
   Future<void> _load({GoalMode? forceMode}) async {
     if (_uid == null) return;
     try {
-      final user = (await _ref.get()).data() ?? {};
+      final user = (await quickDoc(_ref)).data() ?? {};
       final key = Weekly.key(DateTime.now());
       // Research log: remember what target this player was given this week.
       final log = user['weekly_goal_log'];

@@ -1,3 +1,4 @@
+import '../../utils/quick_get.dart';
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../services/sound.dart';
@@ -52,6 +53,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
   @override
   void initState() {
     super.initState();
+    // show the profile at once from the copy the app already has; run stats
+    // fill in when the history arrives
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final cached = UserDoc.instance.snapshotFor(uid)?.data();
+    if (cached != null) {
+      _user = {...cached};
+      _fit = FitnessStats.compute(const [],
+          enduranceBonus: (cached['endurance_bonus'] as num?)?.toInt() ?? 0);
+      _loading = false;
+    }
     _load();
     // Level / XP / coins follow the account LIVE: a level-up after a run
     // shows here at once, without pulling to refresh.
@@ -75,19 +86,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _load() async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) {
-      setState(() => _loading = false);
+      setState(() {
+        _fit ??= FitnessStats.compute(const []);
+        _loading = false;
+      });
       return;
     }
     try {
       final db = FirebaseFirestore.instance;
-      final userSnap = await db.collection('users').doc(uid).get();
-      final actSnap = await db
+      final userSnap = await quickDoc(db.collection('users').doc(uid));
+      final actSnap = await quickQuery(db
           .collection('users')
           .doc(uid)
           .collection('activities')
           .orderBy('startTime', descending: true)
-          .limit(120)
-          .get();
+          .limit(120));
 
       final sessions = <ActivitySession>[];
       for (final d in actSnap.docs) {
@@ -113,7 +126,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
         _loading = false;
       });
     } catch (_) {
-      if (mounted) setState(() => _loading = false);
+      // never leave the screen spinning, and never without stats to draw
+      if (mounted) {
+        setState(() {
+          _fit ??= FitnessStats.compute(const []);
+          _loading = false;
+        });
+      }
     }
   }
 
