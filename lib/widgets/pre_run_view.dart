@@ -67,7 +67,9 @@ const List<Milestone> kMilestones = [
 // ───────────────────────── The view ─────────────────────────
 
 class PreRunView extends StatelessWidget {
-  final VoidCallback onBack;
+  /// Optional back button (none on the RUN tab: the bottom bar is the way to
+  /// the other tabs).
+  final VoidCallback? onBack;
 
   /// Called with the mode the player picked in the Mode Selection overlay.
   final ValueChanged<RunMode> onStart;
@@ -79,7 +81,7 @@ class PreRunView extends StatelessWidget {
 
   const PreRunView({
     super.key,
-    required this.onBack,
+    this.onBack,
     required this.onStart,
     this.ghost,
     this.ghostOn = false,
@@ -167,7 +169,7 @@ class PreRunView extends StatelessWidget {
         padding: const EdgeInsets.all(12),
         child: const Row(
           children: [
-            Text('\u{1F47B}', style: TextStyle(fontSize: 26)),
+            PixelIcon(AppIcons.ghost, size: 32),
             SizedBox(width: 10),
             Expanded(
               child: BlockText(
@@ -189,7 +191,7 @@ class PreRunView extends StatelessWidget {
       onTap: onGhostToggle,
       child: Row(
         children: [
-          const Text('\u{1F47B}', style: TextStyle(fontSize: 26)),
+          const PixelIcon(AppIcons.ghost, size: 32),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
@@ -237,23 +239,25 @@ class PreRunView extends StatelessWidget {
         children: [
           Row(
             children: [
-              PressBlock(
-                color: const Color(0xFFE2E2E2),
-                edge: const Color(0xFF6B6B6B),
-                depth: 4,
-                radius: 12,
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                onTap: onBack,
-                child: const Text(
-                  '◀',
-                  style: TextStyle(
-                    color: Color(0xFF232527),
-                    fontSize: 16,
-                    fontWeight: FontWeight.w900,
+              if (onBack != null) ...[
+                PressBlock(
+                  color: const Color(0xFFE2E2E2),
+                  edge: const Color(0xFF6B6B6B),
+                  depth: 4,
+                  radius: 12,
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  onTap: onBack,
+                  child: const Text(
+                    '◀',
+                    style: TextStyle(
+                      color: Color(0xFF232527),
+                      fontSize: 16,
+                      fontWeight: FontWeight.w900,
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 10),
+                const SizedBox(width: 10),
+              ],
               const Expanded(
                 child: FittedBox(
                   fit: BoxFit.scaleDown,
@@ -502,7 +506,7 @@ class PreRunView extends StatelessWidget {
       padding: const EdgeInsets.all(12),
       child: Row(
         children: [
-          const Text('\u2694\uFE0F', style: TextStyle(fontSize: 26)),
+          const PixelIcon(AppIcons.swords, size: 30),
           const SizedBox(width: 10),
           const Expanded(
             child: BlockText(

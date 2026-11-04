@@ -1,4 +1,8 @@
+import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import '../../widgets/game_notice.dart';
+import '../character/hero_picker_screen.dart' show saveErrorText;
+import '../../widgets/reward_popup.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
@@ -140,20 +144,57 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
     setState(() => _claiming = true);
     try {
       final ref = FirebaseFirestore.instance.collection('users').doc(uid);
-      await FirebaseFirestore.instance.runTransaction((txn) async {
-        final snap = await txn.get(ref);
+      {
+        final snap = await ref.get(const GetOptions(
+            serverTimestampBehavior: ServerTimestampBehavior.estimate));
         final done = (snap.data()?['streak_claims'] as List?)?.contains(key) ?? false;
         if (done) throw 'claimed';
-        txn.update(ref, {
+        // the server allows one streak reward every 12 hours
+        // a claim made a moment ago is still "pending" on the phone: use
+        // its estimated time instead of treating it as "never claimed"
+        final last = (snap.data()?['streak_claim_at'] as Timestamp?)?.toDate();
+        if (last != null) {
+          final next = last.add(const Duration(hours: 12));
+          if (DateTime.now().isBefore(next)) throw next;
+        }
+        // plain write: the coins show up on screen at once
+        final write = ref.update({
           'coins': FieldValue.increment(bonus),
           'streak_claims': FieldValue.arrayUnion([key]),
-          'streak_claim_at': FieldValue.serverTimestamp(), // rules: 1 per day
+          'streak_claim_at': FieldValue.serverTimestamp(), // rules: 1 per 12 h
         });
-      });
-      Sound.I.play(Sfx.gem);
-      _snack('\u{1F525} $days-day streak reward: +$bonus \u{1FA99}');
+        // wait for the server's answer, so "+COINS" only shows for a claim
+        // that really counted (a slow connection keeps it queued)
+        try {
+          await write.timeout(const Duration(seconds: 8));
+        } on TimeoutException {
+          write.catchError((Object e) {
+            debugPrint('streak claim refused later: $e');
+            if (mounted) {
+              Sound.I.play(Sfx.error);
+              _snack(saveErrorText(e, 'Claim failed. Try again.'));
+            }
+          });
+        }
+      }
+      if (mounted) setState(() => _claiming = false);
+      if (mounted) {
+        await showRewardPopup(context,
+            emoji: '\u{1F525}',
+            title: '+$bonus COINS!',
+            subtitle: '$days-day streak reward claimed.\nKeep the fire going!',
+            color: const Color(0xFFB5400A),
+            edge: const Color(0xFF5A1F00));
+      }
     } catch (e) {
-      _snack(e == 'claimed' ? 'Already claimed.' : 'Claim failed. Try again.');
+      debugPrint('streak claim failed: $e');
+      Sound.I.play(Sfx.error);
+      _snack(e == 'claimed'
+          ? 'Already claimed.'
+          : e is DateTime
+              ? 'One streak reward every 12 hours. Next one at '
+                  '${e.hour % 12 == 0 ? 12 : e.hour % 12}:${e.minute.toString().padLeft(2, '0')} ${e.hour < 12 ? 'AM' : 'PM'}.'
+              : saveErrorText(e, 'Claim failed. Try again.'));
     } finally {
       if (mounted) setState(() => _claiming = false);
     }
@@ -250,9 +291,7 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
 
   void _snack(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 2)));
+    showGameNotice(context, msg);
   }
 
   /// Gear is drawn on the human hero only; costume heroes wear their own outfit.
@@ -268,8 +307,23 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
     );
   }
 
-  /// Changing hero asks "are you sure?" first; other saves go straight through.
+  /// Paying asks "are you sure?" first, changing hero too; a free look
+  /// change saves straight away.
   void _askThenSave(String uid, _Data s) {
+    final cost = _cost(s);
+    if (cost > 0) {
+      final what = _buyingName(s) ?? 'this look';
+      showConfirmSheet(
+        context,
+        title: 'BUY $what?'.toUpperCase(),
+        message: 'Buy $what for ${_fmt(cost)} \u{1FA99}?\n'
+            'You will have ${_fmt(s.p.coins - cost)} \u{1FA99} left.',
+        art: HeroStill(heroId: _heroD, tier: BodyTier.normal),
+        confirmLabel: 'YES, BUY IT',
+        onConfirm: () => _purchase(uid),
+      );
+      return;
+    }
     if (_heroD == s.heroId) {
       _purchase(uid);
       return;
@@ -414,19 +468,25 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
 
   Future<void> _purchase(String uid) async {
     setState(() => _buying = true);
+    final bought = <String>[];
     try {
       final ref = FirebaseFirestore.instance.collection('users').doc(uid);
-      await FirebaseFirestore.instance.runTransaction((txn) async {
-        final snap = await txn.get(ref);
+      // A normal write (not a transaction) shows the new coin balance on
+      // screen instantly; the server rules still check the price, and undo
+      // it if anything is wrong.
+      {
+        final snap = await ref.get();
         final fresh = _Data.from(snap.data() ?? <String, dynamic>{});
 
         var coins = 0;
         final newItems = <String>[];
+        bought.clear();
         for (final i in _draftItems()) {
           if (_ownedItem(i, fresh)) continue;
           if (_ruleLockedItem(i, fresh)) throw 'locked';
           coins += _price(i);
           newItems.add(i.id);
+          bought.add('${i.emoji} ${i.name}');
         }
         final h = heroById(_heroD);
         String? newHero;
@@ -434,6 +494,7 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
           if (_ruleLockedHero(h, fresh)) throw 'locked';
           coins += h.coinPrice;
           newHero = h.id;
+          bought.add('${h.name} hero');
         }
         if (fresh.p.coins < coins) throw 'coins';
 
@@ -444,10 +505,53 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
         if (coins > 0) up['coins'] = FieldValue.increment(-coins);
         if (newItems.isNotEmpty) up['owned_items'] = FieldValue.arrayUnion(newItems);
         if (newHero != null) up['owned_heroes'] = FieldValue.arrayUnion([newHero]);
-        txn.update(ref, up);
-      });
-      Sound.I.play(Sfx.buy);
-      _snack('✅ Look saved!');
+        // The coins drop on screen at once (local write). Wait a few
+        // seconds for the server's yes / no, so "PURCHASED!" is only shown
+        // for a purchase that really went through. With a slow connection
+        // the write stays queued and is checked when it reaches the server.
+        var refused = false;
+        final write = ref.update(up);
+        try {
+          await write.timeout(const Duration(seconds: 8));
+        } on TimeoutException {
+          write.catchError((Object e) {
+            debugPrint('purchase refused later: $e');
+            if (mounted) {
+              Sound.I.play(Sfx.error);
+              showGameAlert(context,
+                  title: 'NOT BOUGHT',
+                  message: 'The server refused this purchase, so your coins '
+                      'were given back.\n\n${saveErrorText(e, 'Try again.')}');
+            }
+          });
+        } catch (e) {
+          debugPrint('purchase refused: $e');
+          refused = true;
+          if (mounted) {
+            Sound.I.play(Sfx.error);
+            showGameAlert(context,
+                title: 'NOT BOUGHT',
+                message: 'The server refused this purchase, so your coins '
+                    'were given back.\n\n${saveErrorText(e, 'Try again.')}');
+          }
+        }
+        if (refused) return;
+      }
+      if (mounted) setState(() => _buying = false);
+      if (bought.isEmpty) {
+        Sound.I.play(Sfx.buy);
+        _snack('✅ Look saved!');
+      } else if (mounted) {
+        await showRewardPopup(context,
+            emoji: '\u{1F381}',
+            title: 'PURCHASED!',
+            subtitle: '${bought.join('\n')}\nis yours! Equip or change it any '
+                'time in GEAR.',
+            fx: Fx.unlockBurst,
+            sound: Sfx.unlock,
+            color: const Color(0xFF5B3A9E),
+            edge: const Color(0xFF2A1A52));
+      }
     } catch (e) {
       Sound.I.play(Sfx.error);
       _snack(e == 'coins'
@@ -544,19 +648,32 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
         );
       }
 
+      // Phone: the header, hero preview, search and category tabs scroll
+      // up and away with the items, so the whole screen is used for the
+      // list instead of a small box under a fixed top.
       final searching = _searchFocus.hasFocus;
       return Padding(
         padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
-        child: Column(
-          children: [
-            if (!searching) ...[
-              _buildHeader(s),
-              const SizedBox(height: 8),
-              _buildPreviewPanel(s, uid, tier, wide: false),
-              const SizedBox(height: 4),
-            ],
-            Expanded(child: browse),
+        child: NestedScrollView(
+          headerSliverBuilder: (context, _) => [
+            SliverToBoxAdapter(
+              child: Column(
+                children: [
+                  if (!searching) ...[
+                    _buildHeader(s),
+                    const SizedBox(height: 8),
+                    _buildPreviewPanel(s, uid, tier, wide: false),
+                    const SizedBox(height: 4),
+                  ],
+                  _buildSearchRow(),
+                  const SizedBox(height: 8),
+                  _buildPills(),
+                  const SizedBox(height: 10),
+                ],
+              ),
+            ),
           ],
+          body: _buildContent(s, tier),
         ),
       );
     });
@@ -664,16 +781,27 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
     );
   }
 
+  /// Every category is visible at once (a grid that wraps), so nothing is
+  /// hidden off-screen behind a sideways swipe.
   Widget _buildPills() {
-    return SizedBox(
-      height: 42,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
+    return LayoutBuilder(builder: (context, box) {
+      const gap = 6.0;
+      final cols = box.maxWidth >= 560 ? 5 : 3;
+      final w = (box.maxWidth - gap * (cols - 1)) / cols;
+      return Padding(
         padding: const EdgeInsets.only(bottom: 4),
-        itemCount: _tabs.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 7),
-        itemBuilder: (_, i) {
-          final t = _tabs[i];
+        child: Wrap(
+          spacing: gap,
+          runSpacing: gap,
+          children: [
+            for (final t in _tabs) SizedBox(width: w, child: _pill(t)),
+          ],
+        ),
+      );
+    });
+  }
+
+  Widget _pill(_TabDef t) {
           final sel = _tab == t.key;
           return PressBlock(
             color: t.color,
@@ -686,7 +814,10 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                BlockText(t.label, size: 11.5, stroke: 3),
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: BlockText(t.label, size: 11.5, stroke: 3),
+                ),
                 const SizedBox(height: 1),
                 AnimatedContainer(
                   duration: const Duration(milliseconds: 150),
@@ -700,9 +831,6 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
               ],
             ),
           );
-        },
-      ),
-    );
   }
 
   // ───────────────────────── content ─────────────────────────
@@ -997,9 +1125,13 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
     final key = _streakKey(need);
     final claimed = key.isNotEmpty && s.streakClaims.contains(key);
     final ready = days >= need && !claimed && uid != null;
-    final Color c = claimed ? Rb.panel : (ready ? Rb.green : Rb.slate);
+    const greyFill = Color(0xFF5A5E63);
+    const greyText = Color(0xFFA9AEB4);
+    final Color c = claimed ? greyFill : (ready ? Rb.green : Rb.slate);
     final Color e = claimed ? Rb.panelEdge : (ready ? Rb.greenEdge : Rb.slateEdge);
-    return PressBlock(
+    return Opacity(
+      opacity: claimed ? 0.7 : 1,
+      child: PressBlock(
       color: c,
       edge: e,
       depth: 3,
@@ -1009,18 +1141,20 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
       onTap: ready && !_claiming ? () => _claimStreak(uid, need, bonus) : null,
       child: Column(
         children: [
-          BlockText('${need}D', size: 11.5, stroke: 3.5),
+          BlockText('${need}D', size: 11.5, stroke: 3.5,
+              color: claimed ? greyText : Colors.white),
           FittedBox(
             fit: BoxFit.scaleDown,
             child: BlockText(
-              claimed ? '✔' : '\u{1FA99}$bonus',
-              size: 10.5,
+              claimed ? 'CLAIMED' : '\u{1FA99}$bonus',
+              size: claimed ? 9 : 10.5,
               stroke: 3,
-              color: claimed ? Rb.neon : (ready ? Colors.white : Rb.gold),
+              color: claimed ? greyText : (ready ? Colors.white : Rb.gold),
             ),
           ),
         ],
       ),
+    ),
     );
   }
 
@@ -1053,11 +1187,11 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
                 const SizedBox(height: 5),
                 BlockText(
                   owned
-                      ? '✔ OWNED'
+                      ? 'OWNED'
                       : '${_priceText(i)}  •  25% off, tap to try on',
                   size: 10.5,
                   stroke: 3,
-                  color: owned ? Rb.neon : Colors.white,
+                  color: owned ? const Color(0xFFA9AEB4) : Colors.white,
                 ),
               ],
             ),

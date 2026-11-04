@@ -19,11 +19,16 @@ extension ActivityTypeExt on ActivityType {
     }
   }
 
-  // Speed thresholds in km/h
-  // walk < 6, jog 6–10, run > 10
+  // Speed thresholds in km/h (average MOVING speed of the whole run):
+  //   walk  < 6.5 km/h   (pace slower than about 9:15 per km)
+  //   jog   6.5 - 9.7    (about 9:15 - 6:10 per km)
+  //   run   >= 9.7       (6 mph and faster, the usual jog / run line)
+  static const double jogFromKmh = 6.5;
+  static const double runFromKmh = 9.7;
+
   static ActivityType fromSpeed(double kmh) {
-    if (kmh >= 10.0) return ActivityType.run;
-    if (kmh >= 6.0)  return ActivityType.jog;
+    if (kmh >= runFromKmh) return ActivityType.run;
+    if (kmh >= jogFromKmh) return ActivityType.jog;
     return ActivityType.walk;
   }
 }
@@ -91,9 +96,14 @@ class ActivitySession {
     final d = doc.data() as Map<String, dynamic>;
     return ActivitySession(
       id:              doc.id,
-      type:            ActivityType.values.firstWhere(
-                         (e) => e.name == (d['type'] ?? 'walk'),
-                         orElse: () => ActivityType.walk),
+      // the saved average speed decides (older app versions labelled most
+      // runs "walk" by mistake); the saved type only when there is no speed
+      type:            ((d['avgSpeedKmh'] as num?)?.toDouble() ?? 0) > 0.5
+                         ? ActivityTypeExt.fromSpeed(
+                             (d['avgSpeedKmh'] as num).toDouble())
+                         : ActivityType.values.firstWhere(
+                             (e) => e.name == (d['type'] ?? 'walk'),
+                             orElse: () => ActivityType.walk),
       userPick:        ActivityType.values.firstWhere(
                          (e) => e.name == (d['userPick'] ?? 'run'),
                          orElse: () => ActivityType.run),

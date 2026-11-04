@@ -6,6 +6,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 
 import 'block_ui.dart';
 import 'delete_account_dialog.dart';
+import 'tester_panel.dart';
+import '../services/tester_mode.dart';
 
 /// ⚙ SETTINGS pop-up: music, sound effects, vibration.
 /// Open it with [showSettingsSheet]. Everything saves on the phone at once.
@@ -116,6 +118,8 @@ class _SettingsSheet extends StatelessWidget {
                   ),
                 ),
                 if (FirebaseAuth.instance.currentUser != null) ...[
+                  // only accounts listed in Firestore "testers" see this
+                  _TesterEntry(uid: FirebaseAuth.instance.currentUser!.uid),
                   const SizedBox(height: 14),
                   TextButton(
                     onPressed: () async {
@@ -140,6 +144,48 @@ class _SettingsSheet extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// "TESTER TOOLS" button, shown only to tester accounts.
+class _TesterEntry extends StatefulWidget {
+  final String uid;
+  const _TesterEntry({required this.uid});
+
+  @override
+  State<_TesterEntry> createState() => _TesterEntryState();
+}
+
+class _TesterEntryState extends State<_TesterEntry> {
+  late final Future<bool> _isTester = TesterMode.check(widget.uid);
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<bool>(
+      future: _isTester,
+      builder: (context, snap) {
+        if (snap.data != true) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(top: 12),
+          child: PressBlock(
+            color: const Color(0xFF6B4FD8),
+            edge: const Color(0xFF2A1B66),
+            depth: 6,
+            radius: 14,
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            onTap: () async {
+              final nav = Navigator.of(context);
+              await nav.maybePop(); // close Settings first
+              if (nav.context.mounted) await showTesterPanel(nav.context);
+            },
+            child: const SizedBox(
+              width: double.infinity,
+              child: Center(child: BlockText('TESTER TOOLS', size: 16, stroke: 4)),
+            ),
+          ),
+        );
+      },
     );
   }
 }

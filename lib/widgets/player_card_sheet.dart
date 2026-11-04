@@ -90,6 +90,10 @@ class _PlayerCardState extends State<_PlayerCard> {
         case AddResult.accepted:
           _rel = Relation.friend;
           _note = 'You are friends now!';
+        case AddResult.cooldown:
+          _note = 'They said no. You can ask again in 24 hours.';
+        case AddResult.full:
+          _note = 'Your friend list is full (${FriendsService.maxFriends}).';
         case AddResult.error:
           _note = 'Could not send the request. Try again.';
       }
@@ -278,11 +282,11 @@ class _PlayerCardState extends State<_PlayerCard> {
     );
   }
 
-  /// Badges anyone can verify from the public user doc (sessions, km, level).
+  /// Every badge this player has earned (public totals + their published
+  /// badge records), the same set they see on their own profile.
   Widget _badgesRow() {
     final stats = BadgeStats.fromPublic(d);
-    final earned =
-        kBadges.where((b) => b.public && b.unlocked(stats)).toList();
+    final earned = kBadges.where((b) => b.unlocked(stats)).toList();
     return Block(
       color: Rb.slate,
       edge: Rb.slateEdge,

@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
+import 'emoji_icons.dart';
 
 import '../models/hero_progress.dart';
 import '../models/run_mode.dart';
 import 'block_ui.dart';
+import 'pixel_icon.dart';
+import '../constants/app_icons.dart';
 
 /// One line of "how to unlock": what is needed and how far the player is.
 class UnlockReq {
@@ -223,12 +226,46 @@ Future<void> showModeLockedSheet(
         : m.isStage
             ? 'STAGE RANK'
             : 'RUN MODE',
-    art: art ?? Center(child: Text(m.emoji, style: const TextStyle(fontSize: 54))),
+    art: art ?? _ModeArt(m),
     reqs: [UnlockReq(what, progress: done ? 'CLEARED' : 'NOT YET', done: done)],
     tip: how,
     accent: m.color,
     accentEdge: m.edge,
   );
+}
+
+/// The mode's own map picture (the same one its card uses), darkened at the
+/// bottom, with a pixel padlock on top.
+class _ModeArt extends StatelessWidget {
+  final RunMode m;
+  const _ModeArt(this.m);
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Image.asset(
+            m.mapAsset,
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => ColoredBox(color: m.color),
+          ),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Colors.transparent, m.edge.withValues(alpha: 0.8)],
+              ),
+            ),
+          ),
+          const Center(child: PixelIcon(AppIcons.lock, size: 40)),
+        ],
+      ),
+    );
+  }
 }
 
 class _UnlockSheet extends StatelessWidget {
@@ -338,7 +375,7 @@ class _UnlockSheet extends StatelessWidget {
                 if (priceLabel != null) _priceRow(),
                 if (tip != null) ...[
                   const SizedBox(height: 6),
-                  Text('\u{1F4A1} $tip',
+                  EmojiText('\u{1F4A1} $tip',
                       style: const TextStyle(
                           color: Color(0xFF1F2327),
                           fontSize: 12.5,
@@ -397,7 +434,7 @@ class _UnlockSheet extends StatelessWidget {
         children: [
           Row(
             children: [
-              Text(r.done ? '✅' : '⬜', style: const TextStyle(fontSize: 16)),
+              EmojiText(r.done ? '✅' : '\u2B1C', style: const TextStyle(fontSize: 16)),
               const SizedBox(width: 8),
               Expanded(
                 child: Align(
@@ -444,7 +481,7 @@ class _UnlockSheet extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
       child: Row(
         children: [
-          const Text('\u{1F6D2}', style: TextStyle(fontSize: 16)),
+          const EmojiText('\u{1F6D2}', style: TextStyle(fontSize: 16)),
           const SizedBox(width: 8),
           Expanded(
             child: Align(
@@ -511,7 +548,7 @@ Future<void> showNeedMoreSheet(
     title: what,
     kind: 'NOT ENOUGH COINS',
     art: art ??
-        const Center(child: Text('\u{1FA99}', style: TextStyle(fontSize: 54))),
+        const Center(child: EmojiText('\u{1FA99}', style: TextStyle(fontSize: 54))),
     reqs: reqs,
     tip: 'Coins come from every run, daily quests, rank clears and stars, '
         'streak rewards and the weekly goal. The more you run, the more you earn!',

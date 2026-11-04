@@ -13,6 +13,7 @@ import '../../widgets/player_card_sheet.dart';
 import '../../utils/player_stats.dart' show LevelProgress;
 import '../../utils/weekly.dart';
 import '../../services/presence.dart';
+import '../../state/user_doc.dart';
 
 class LeaderboardScreen extends StatefulWidget {
   const LeaderboardScreen({super.key});
@@ -26,6 +27,71 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
   // 100 full profiles re-downloaded them on every change and cost a lot of
   // Firestore reads.
   final Map<int, Future<QuerySnapshot<Map<String, dynamic>>>> _boards = {};
+
+  /// My position on each board when I'm not in the top 100 (null = not on
+  /// that board, e.g. no run this week).
+  final Map<int, Future<int?>> _myRank = {};
+
+  Future<int?> _rankOf(int idx, Map<String, dynamic> me) async {
+    final users = FirebaseFirestore.instance.collection('users');
+    final now = DateTime.now();
+    final Query<Map<String, dynamic>> q;
+    if (idx == 0) {
+      final key = Weekly.key(now);
+      if (me['week_key'] != key) return null;
+      q = users
+          .where('week_key', isEqualTo: key)
+          .where('week_km', isGreaterThan: (me['week_km'] as num?) ?? 0);
+    } else if (idx == 1) {
+      final key = monthKey(now);
+      if (me['month_key'] != key) return null;
+      q = users
+          .where('month_key', isEqualTo: key)
+          .where('month_km', isGreaterThan: (me['month_km'] as num?) ?? 0);
+    } else {
+      q = users.where('xp', isGreaterThan: (me['xp'] as num?) ?? 0);
+    }
+    final c = await q.count().get();
+    return (c.count ?? 0) + 1;
+  }
+
+  /// Pinned "YOU" row under the top 100.
+  Widget _myRow(String uid, Map<String, dynamic> me) {
+    final f = _myRank[_timeIdx] ??= _rankOf(_timeIdx, me);
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(left: 4, bottom: 6),
+            child: BlockText('YOUR RANK', size: 12, stroke: 3, color: Rb.gold),
+          ),
+          FutureBuilder<int?>(
+            future: f,
+            builder: (context, snap) {
+              if (snap.connectionState != ConnectionState.done) {
+                return const SizedBox(height: 40);
+              }
+              final rank = snap.data;
+              if (rank == null) {
+                return BlockText(
+                  _timeIdx == 0
+                      ? 'Run this week to get on the board!'
+                      : 'Run this month to get on the board!',
+                  size: 11,
+                  stroke: 3,
+                  align: TextAlign.center,
+                );
+              }
+              return _buildRow(
+                  rank, _LeaderboardEntry.fromData(uid, me, _timeIdx), true);
+            },
+          ),
+        ],
+      ),
+    );
+  }
   Stream<QuerySnapshot<Map<String, dynamic>>>? _requests;
 
   int _timeIdx = 2; // 0 this week (km), 1 this month (km), 2 all time (XP)
@@ -90,6 +156,8 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
                   }
 
                   var entries = snapshot.data!.docs
+                      // tester accounts (Settings > TESTER TOOLS) never rank
+                      .where((d) => d.data()['tester'] != true)
                       .map((d) => _LeaderboardEntry.fromDoc(d, _timeIdx))
                       .toList();
 
@@ -110,13 +178,28 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
                         _emptyNote(note ?? 'No heroes match this filter yet.'));
                   }
 
+                  // not in the top 100: pin my own row under the list
+                  final me = myUid == null
+                      ? null
+                      : UserDoc.instance.snapshotFor(myUid)?.data();
+                  final pinMe = me != null &&
+                      _genderFilter == 'all' &&
+                      me['tester'] != true &&
+                      !entries.any((e) => e.uid == myUid);
+                  final extra = (note == null ? 0 : 1) + (pinMe ? 1 : 0);
+
                   return RefreshIndicator(
                     onRefresh: _refresh,
                     child: ListView.builder(
                     physics: const AlwaysScrollableScrollPhysics(),
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                    itemCount: entries.length + (note == null ? 0 : 1),
+                    itemCount: entries.length + extra,
                     itemBuilder: (context, i) {
+                      final u = myUid, m = me;
+                      if (pinMe && u != null && m != null &&
+                          i == entries.length + extra - 1) {
+                        return _myRow(u, m);
+                      }
                       if (note != null && i == entries.length) {
                         return Padding(
                           padding: const EdgeInsets.only(top: 6),
@@ -143,6 +226,7 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
 
   Future<void> _refresh() async {
     final f = _board(_timeIdx, refresh: true);
+    _myRank.remove(_timeIdx);
     setState(() {});
     try {
       await f;
@@ -277,11 +361,15 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
             ],
           ],
         ),
-        const Padding(
-          padding: EdgeInsets.only(bottom: 6),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 6),
           child: Text(
-            'Week/Month filtering coming soon — showing All Time',
-            style: TextStyle(
+            switch (_timeIdx) {
+              0 => 'Ranked by km run this week \u2022 resets every Monday',
+              1 => 'Ranked by km run this month \u2022 resets on the 1st',
+              _ => 'Ranked by total XP',
+            },
+            style: const TextStyle(
                 color: Colors.white54, fontSize: 10, fontWeight: FontWeight.w800),
           ),
         ),
@@ -533,12 +621,15 @@ class _LeaderboardEntry {
   /// The number shown big on the right (the board is ranked by XP).
   int get score => xp;
 
-  factory _LeaderboardEntry.fromDoc(QueryDocumentSnapshot doc, [int tab = 2]) {
-    final d = doc.data() as Map<String, dynamic>;
+  factory _LeaderboardEntry.fromDoc(QueryDocumentSnapshot doc, [int tab = 2]) =>
+      _LeaderboardEntry.fromData(doc.id, doc.data() as Map<String, dynamic>, tab);
+
+  factory _LeaderboardEntry.fromData(String uid, Map<String, dynamic> d,
+      [int tab = 2]) {
     return _LeaderboardEntry(
       byKm: tab != 2,
       km: ((tab == 0 ? d['week_km'] : d['month_km']) as num?)?.toDouble() ?? 0,
-      uid: doc.id,
+      uid: uid,
       username: d['username'] ?? 'Hero',
       level: LevelProgress.fromXp((d['xp'] as num?)?.toInt() ?? 0).level,
       xp: (d['xp'] as num?)?.toInt() ?? 0,

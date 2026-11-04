@@ -1,4 +1,8 @@
 import 'dart:async';
+import '../../widgets/reward_popup.dart';
+import '../../widgets/lottie_fx.dart' show Fx;
+import '../../services/sound.dart' show Sfx;
+import '../../widgets/game_notice.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -113,9 +117,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
 
   void _snack(String m) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(m)));
+    showGameNotice(context, m);
   }
 
   bool _unread(String otherUid) {
@@ -319,6 +321,20 @@ class _FriendsScreenState extends State<FriendsScreen> {
           body: '$name had already asked to be your friend, so you are connected.',
           color: Rb.neon,
         );
+      case AddResult.cooldown:
+        await _dialog(
+          icon: '\u23F3',
+          title: 'TRY AGAIN TOMORROW',
+          body: '$name said no to your last request. You can ask again 24 hours after that.',
+          color: Rb.gold,
+        );
+      case AddResult.full:
+        await _dialog(
+          icon: '\u{1F465}',
+          title: 'FRIEND LIST FULL',
+          body: 'You already have ${FriendsService.maxFriends} friends. Remove one to add someone new.',
+          color: Rb.gold,
+        );
       case AddResult.error:
         await _dialog(
           icon: '⚠️',
@@ -338,7 +354,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
       message: idle
           ? 'They have the app open but have not touched it for a few minutes, so they may not see your invite. Send a chat message first, and duel them when their dot turns green.'
           : 'A duel is a live race, so your friend must be online to accept it.${lastSeen != null ? ' Last seen $lastSeen.' : ''} Chat with them, and challenge them when their dot turns green.',
-      art: Center(child: Text(idle ? '\u{1F634}' : '\u{1F4F4}', style: const TextStyle(fontSize: 44))),
+      art: Center(child: EmojiText(idle ? '\u{1F634}' : '\u{1F4F4}', style: const TextStyle(fontSize: 44))),
     );
   }
 
@@ -936,7 +952,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
                       radius: 12,
                       padding: const EdgeInsets.all(10),
                       onTap: () => _openChat(f.id, name),
-                      child: const Text('\u{1F4AC}', style: TextStyle(fontSize: 18)),
+                      child: const EmojiText('\u{1F4AC}', style: TextStyle(fontSize: 18)),
                     ),
                     if (_unread(f.id))
                       Positioned(
@@ -1015,7 +1031,16 @@ class _FriendsScreenState extends State<FriendsScreen> {
                       try {
                         await FriendsService.accept(
                             me: _me, myName: _myName, fromUid: r.data()['from'] as String);
-                        _snack('\u{1F389} Friend added!');
+                        if (mounted) {
+                          showRewardPopup(context,
+                              emoji: '\u{1F91D}',
+                              title: 'FRIEND ADDED!',
+                              subtitle: 'Chat, compare runs and challenge them to a live duel.',
+                              fx: Fx.unlockBurst,
+                              sound: Sfx.unlock,
+                              color: const Color(0xFF1E6B45),
+                              edge: const Color(0xFF0B2E1D));
+                        }
                       } catch (_) {
                         _snack('Could not accept. Try again.');
                       }

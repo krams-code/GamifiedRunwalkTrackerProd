@@ -1,4 +1,9 @@
 import 'dart:async';
+import '../widgets/emoji_icons.dart';
+import '../widgets/game_notice.dart';
+import '../utils/player_stats.dart' show LevelProgress;
+import '../state/user_doc.dart';
+import '../widgets/reward_popup.dart';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart'
@@ -109,6 +114,9 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
   /// SAVE of an interrupted run: keep the time recorded before the app
   /// closed (don't count the hours it was closed).
   bool _frozenClock = false;
+
+  /// Set when this run's XP reached a new level (shown after the summary).
+  int? _levelUpTo;
 
   // ── Location check before the run (phase: locating) ──
   bool _useGps = true;
@@ -253,16 +261,6 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
   }
 
   // ── EXIT ───────────────────────────────────────────────────────────────────
-
-  void _exitRunScreen() {
-    _positionSub?.cancel();
-    _timer?.cancel();
-    ChallengeAudio.instance.stop();
-
-    if (widget.onExit != null) {
-      widget.onExit!();
-    }
-  }
 
   // ── PRE-RUN → WARM-UP ─────────────────────────────────────────────────────
 
@@ -754,7 +752,7 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text('\u{1F3C3}', style: TextStyle(fontSize: 44)),
+              const EmojiText('\u{1F3C3}', style: TextStyle(fontSize: 44)),
               const SizedBox(height: 6),
               const BlockText('UNFINISHED RUN', size: 22, stroke: 5, color: Rb.gold),
               const SizedBox(height: 8),
@@ -1064,49 +1062,52 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
     _summaryGhost = ghostResult;
     final ghostCoins = ghostResult?.won == true ? GhostResult.winCoins : 0;
 
-    // Determine final activity type by majority vote of speed samples.
+    // Walk / jog / run from the AVERAGE MOVING SPEED (distance / moving
+    // time). A vote over single GPS readings let every stop, crossing and
+    // slow start count as "walk", so most runs were saved as walks.
     ActivityType finalType = _userPick;
-
-    if (_speedSamples.isNotEmpty) {
-      int walkCount = 0;
-      int jogCount = 0;
-      int runCount = 0;
-
-      for (final speed in _speedSamples) {
-        final type =
-            ActivityTypeExt.fromSpeed(speed);
-
-        if (type == ActivityType.walk) {
-          walkCount++;
-        } else if (type == ActivityType.jog) {
-          jogCount++;
-        } else {
-          runCount++;
-        }
-      }
-
-      if (runCount >= jogCount &&
-          runCount >= walkCount) {
-        finalType = ActivityType.run;
-      } else if (jogCount >= walkCount) {
-        finalType = ActivityType.jog;
-      } else {
-        finalType = ActivityType.walk;
-      }
+    final avgKmh = _avgSpeed;
+    if (_distanceKm >= 0.05 && avgKmh > 0.5) {
+      finalType = ActivityTypeExt.fromSpeed(avgKmh);
     }
+
+    // Runs that can't count: almost no distance (start + stop at once), or an
+    // average moving speed faster than running (bike / vehicle). They are
+    // not saved, so they give no rewards, streak days, badges or rank clears.
+    String? notCounted;
+    if (_distanceKm < RunRewards.minCountKm) {
+      notCounted = 'TOO SHORT TO COUNT\nRuns under '
+          '${(RunRewards.minCountKm * 1000).round()} m are not saved, so they '
+          'give no rewards, streak days or badges.';
+    } else if (avgKmh > RunRewards.maxAvgRunKmh) {
+      notCounted = 'LOOKS LIKE A RIDE\nYour average moving speed was '
+          '${avgKmh.toStringAsFixed(1)} km/h, faster than running. Bike or '
+          'vehicle trips are not counted.';
+    }
+    _notCounted = notCounted;
+    if (notCounted != null) {
+      _outcomeGood = false;
+      if (_mode.isStage) _outcome = 'NOT COUNTED';
+      challengeRecords.clear();
+      _summaryChallenges = const [];
+      _summaryGhost = null;
+    }
+    final counted = notCounted == null;
 
     // Mode multiplier: Novice 1.0x, Vanguard 1.5x, Slayer 2.5x, Free Run 0.8x.
     final mult = _mode.rewardMult;
 
     // Reward = verified distance + MOVING time + pace bonus (utils/rewards.dart)
-    final xp = RunRewards.xp(
-      km: _distanceKm,
-      activeSeconds: _activeSeconds,
-      mult: mult,
-      bonusXp: bonusXp.round(),
-    );
+    final xp = !counted
+        ? 0
+        : RunRewards.xp(
+            km: _distanceKm,
+            activeSeconds: _activeSeconds,
+            mult: mult,
+            bonusXp: bonusXp.round(),
+          );
 
-    final coins = RunRewards.coins(km: _distanceKm, mult: mult);
+    final coins = !counted ? 0 : RunRewards.coins(km: _distanceKm, mult: mult);
 
     // Challenge bonus coins scale with the mode; the ghost prize stays fixed.
     final modeBonus = (bonusCoins * mult).round();
@@ -1171,7 +1172,7 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
     _savedOffline = false;
     _saveError = null;
     final user = FirebaseAuth.instance.currentUser;
-    if (user != null) {
+    if (user != null && counted) {
       final fields = session.toFirestore()
         ..['activeSeconds'] = _activeSeconds
         ..['startTime'] = session.startTime.millisecondsSinceEpoch
@@ -1188,7 +1189,8 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
         ghost: ghostResult?.toMap(),
         xp: xp,
         coins: coins,
-        bonusCoins: modeBonus + ghostCoins,
+        // each Pace Keeper loot chest opens into coins
+        bonusCoins: modeBonus + ghostCoins + lootChests * RunRewards.lootChestCoins,
         lootChests: lootChests,
         elapsedSeconds: _elapsedSeconds,
         interval: interval,
@@ -1197,8 +1199,16 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
       // device never manages to finish the save
       RunCloud.stash(payload);
       try {
+        final xpBefore = (UserDoc.instance.snapshotFor(user.uid)?.data()?['xp']
+                as num?)
+            ?.toInt();
         final r = await RunSaver.save(payload).timeout(RunSaver.timeout);
         RunCloud.done(user.uid, payload.id);
+        if (xpBefore != null && !r.duplicate && !r.late) {
+          final before = LevelProgress.fromXp(xpBefore).level;
+          final after = LevelProgress.fromXp(xpBefore + xp).level;
+          _levelUpTo = after > before ? after : null;
+        }
         if (r.late && mounted) {
           _showSnack('This run overlaps one already saved, so it was kept '
               'in your history without rewards.');
@@ -1243,7 +1253,7 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
   /// Jingle for the finished run, then little extras for what it earned.
   void _playResultSounds() {
     Sound.I.music(null); // quiet the track so the jingle is heard
-    final won = _outcome == null || _outcomeGood;
+    final won = _notCounted == null && (_outcome == null || _outcomeGood);
     Sound.I.play(won ? Sfx.success : Sfx.fail);
     Future<void>.delayed(const Duration(milliseconds: 1300), () {
       if (_unlockedRank != null) {
@@ -1269,6 +1279,7 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
         isSaving: _isSaving,
         queued: _savedOffline,
         saveError: _saveError,
+        notCounted: _notCounted,
         intervalStats: _intervalStats,
         intervalNewBest: _intervalNewBest,
         completedQuests:
@@ -1291,6 +1302,9 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
   bool _tutorialLaunching = false;
   bool _savedOffline = false;
   String? _saveError;
+
+  /// Why the last run was not counted (too short / too fast), else null.
+  String? _notCounted;
 
 
   /// DONE on the Session Summary.
@@ -1325,6 +1339,23 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
   void _closeSummary() {
     Navigator.of(context).pop();
 
+    // a new level: celebrate it once the summary is closed
+    final lv = _levelUpTo;
+    _levelUpTo = null;
+    if (lv != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        showRewardPopup(context,
+            emoji: '\u2B50',
+            title: 'LEVEL UP!',
+            subtitle: 'You reached LEVEL $lv.\nNew heroes and items may be unlocked!',
+            fx: Fx.levelBurst,
+            sound: Sfx.levelUp,
+            color: const Color(0xFF8A5A00),
+            edge: const Color(0xFF3A2600));
+      });
+    }
+
     // Do NOT Navigator.pop() the RunTrackingScreen.
     // It lives inside MainShell's IndexedStack.
     if (mounted) {
@@ -1356,13 +1387,9 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
   }
 
   void _showSnack(String msg) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(
-      SnackBar(
-        content: Text(msg),
-        backgroundColor: Rb.panel,
-      ),
-    );
+    if (!mounted) return;
+    showGameNotice(context, msg,
+        kind: msg.startsWith('GPS') ? NoticeKind.warning : NoticeKind.info);
   }
 
   // ── BUILD ──────────────────────────────────────────────────────────────────
@@ -1431,7 +1458,7 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
 
   Widget _buildPreRun() {
     return PreRunView(
-      onBack: _exitRunScreen,
+      // no back arrow on the RUN tab (it only jumped to the SHOP)
       onStart: _onModePicked,
       ghost: _ghost,
       ghostOn: _ghostOn,

@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'emoji_icons.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
@@ -90,36 +91,39 @@ class _FriendsWeekCardState extends State<FriendsWeekCard> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              const BlockText('\u{1F465} FRIENDS THIS WEEK', size: 13, stroke: 3.5),
-              const Spacer(),
-              BlockText(Weekly.countdown(DateTime.now()), size: 9, stroke: 2.5),
-            ],
-          ),
+          const BlockText('\u{1F465} FRIENDS THIS WEEK', size: 13, stroke: 3.5),
           const SizedBox(height: 8),
-          if (_friendCount == 0)
-            Row(
-              children: [
-                const Expanded(
-                  child: BlockText(
-                    'Add a friend to see who is running this week — and challenge them to a live duel!',
-                    size: 10.5,
-                    stroke: 3,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                PressBlock(
-                  color: Rb.blue,
-                  edge: Rb.blueEdge,
-                  depth: 4,
-                  radius: 10,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-                  onTap: _open,
-                  child: const BlockText('ADD', size: 12, stroke: 3.5),
-                ),
-              ],
-            )
+          if (_friendCount == 0) ...[
+            const BlockText(
+              'Running is more fun together! Add a friend with their HERO code to:',
+              size: 11,
+              stroke: 3,
+            ),
+            const SizedBox(height: 6),
+            for (final line in const [
+              '\u{1F3C3} see who is running this week',
+              '\u{1F4AC} chat and cheer each other on',
+              '\u2694\uFE0F challenge them to a live run duel',
+            ])
+              Padding(
+                padding: const EdgeInsets.only(left: 4, bottom: 3),
+                child: BlockText(line, size: 10.5, stroke: 2.5,
+                    color: const Color(0xFFD7F5E8)),
+              ),
+            const SizedBox(height: 8),
+            PressBlock(
+              color: Rb.blue,
+              edge: Rb.blueEdge,
+              depth: 5,
+              radius: 12,
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              onTap: _open,
+              child: const SizedBox(
+                width: double.infinity,
+                child: Center(child: BlockText('ADD A FRIEND', size: 14, stroke: 3.5)),
+              ),
+            ),
+          ]
           else ...[
             for (var i = 0; i < rows.length && i < 5; i++) _row(i, rows[i], rows.first.km),
             if (rows.length > 5)
@@ -173,7 +177,7 @@ class _FriendsWeekCardState extends State<FriendsWeekCard> {
                     if (r.ranToday)
                       const Padding(
                         padding: EdgeInsets.only(left: 4),
-                        child: Text('\u{1F525}', style: TextStyle(fontSize: 11)),
+                        child: EmojiText('\u{1F525}', style: TextStyle(fontSize: 11)),
                       ),
                   ],
                 ),

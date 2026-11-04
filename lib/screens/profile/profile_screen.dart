@@ -1,4 +1,7 @@
+import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import '../../services/sound.dart';
+import '../../widgets/reward_popup.dart';
 import 'package:hakbanghero/services/private_data.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -7,12 +10,12 @@ import 'package:hakbanghero/models/activity_model.dart';
 import 'package:hakbanghero/models/badge_definitions.dart';
 
 import '../../state/evolution_state.dart';
+import '../../state/user_doc.dart';
 import '../../utils/player_stats.dart';
 import '../../utils/xp_milestones.dart';
 import '../../widgets/avatar_layer_stack.dart' show kSpriteWidth, kSpriteHeight;
 import '../../widgets/avatar_preview.dart';
 import '../../widgets/badges_panel.dart';
-import '../../widgets/block_inputs.dart' show blockSnack;
 import '../../widgets/block_ui.dart';
 import '../../widgets/scene_backdrop.dart';
 import '../../widgets/evolution_checkin_dialog.dart';
@@ -43,10 +46,30 @@ class _ProfileScreenState extends State<ProfileScreen> {
   int _tab = 0; // 0 = STATS, 1 = RECORDS
   List<ActivitySession> _runs = const [];
 
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _live;
+  int? _runsSeen;
+
   @override
   void initState() {
     super.initState();
     _load();
+    // Level / XP / coins follow the account LIVE: a level-up after a run
+    // shows here at once, without pulling to refresh.
+    _live = UserDoc.instance.stream.listen((snap) {
+      final d = snap.data();
+      if (d == null || !mounted || _loading) return;
+      final runs = (d['total_sessions'] as num?)?.toInt();
+      setState(() => _user = {..._user, ...d});
+      // a new run: also refresh the stats and records from the history
+      if (_runsSeen != null && runs != _runsSeen) _load();
+      _runsSeen = runs;
+    }, onError: (Object _) {});
+  }
+
+  @override
+  void dispose() {
+    _live?.cancel();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -76,9 +99,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
         ...?userSnap.data(),
         ...await PrivateData.load(uid),
       };
+      _publishBadges(uid, data, sessions);
       if (!mounted) return;
       setState(() {
         _user = data;
+        _runsSeen = (data['total_sessions'] as num?)?.toInt();
         _runs = sessions;
         _fit = FitnessStats.compute(
           sessions,
@@ -104,20 +129,28 @@ class _ProfileScreenState extends State<ProfileScreen> {
             'Your next check-in opens in ${EvolutionState.timeLeftLabel(_user)}. '
             'You update your weight once a week, so your progress is fair for everyone. '
             "We'll remind you when it's time!",
-        art: const Center(child: Text('\u2696\uFE0F', style: TextStyle(fontSize: 46))),
+        art: const Center(child: EmojiText('\u2696\uFE0F', style: TextStyle(fontSize: 46))),
       );
       return;
     }
     final r = await showEvolutionCheckIn(context);
     if (!mounted || r == null) return;
     _load();
-    blockSnack(
-      context,
-      r.improved
-          ? '🔥 EVOLVED INTO ${r.after.label.toUpperCase()}!'
-              '${r.enduranceAwarded ? '  +${EvolutionState.enduranceBonus} ENDURANCE' : ''}'
-          : '💾 Check-in saved: ${r.after.label}',
-    );
+    showRewardPopup(
+        context,
+        emoji: r.improved ? '\u{1F525}' : '\u{1F4BE}',
+        title: r.improved
+            ? 'EVOLVED INTO ${r.after.label.toUpperCase()}!'
+            : 'CHECK-IN SAVED',
+        subtitle: r.improved
+            ? 'Your hero changed with your progress.'
+                '${r.enduranceAwarded ? '\n+${EvolutionState.enduranceBonus} ENDURANCE' : ''}'
+            : 'Body form: ${r.after.label}. See you next week!',
+        fx: r.improved ? Fx.levelBurst : Fx.coinSpin,
+        sound: r.improved ? Sfx.levelUp : Sfx.coin,
+        color: const Color(0xFF8A5A00),
+        edge: const Color(0xFF3A2600),
+      );
   }
 
   Future<void> _pickHero() async {
@@ -423,6 +456,33 @@ class _ProfileScreenState extends State<ProfileScreen> {
         ],
       ),
     );
+  }
+
+  /// Other players can't read my run history, so publish my badge records
+  /// (best of what is stored and what my runs show). Only writes on change.
+  void _publishBadges(
+      String uid, Map<String, dynamic> data, List<ActivitySession> runs) {
+    try {
+      final f = FitnessStats.compute(runs,
+          weightKg: (data['weight_kg'] as num?)?.toDouble(),
+          enduranceBonus: (data['endurance_bonus'] as num?)?.toInt() ?? 0);
+      final mine = BadgeStats.from(
+        user: data,
+        runs: runs,
+        longestRunKm: f.longestRunKm,
+        bestPaceSecsPerKm: f.bestPaceSecsPerKm,
+        longestStreakDays: f.longestStreakDays,
+      ).merge(BadgeStats.fromPublic(data));
+      final next = mine.toPublic();
+      final old = (data['badge_stats'] as Map?) ?? const {};
+      final same = next.entries.every((e) => old[e.key] == e.value);
+      if (!same) {
+        FirebaseFirestore.instance
+            .collection('users')
+            .doc(uid)
+            .update({'badge_stats': next}).catchError((Object _) {});
+      }
+    } catch (_) {}
   }
 
   // ── tabs ─────────────────────────────────────────────────────────────

@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:hakbanghero/widgets/google_logo.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
@@ -132,13 +133,9 @@ class _LoginScreenState extends State<LoginScreen> {
                           obscure: _obscure,
                           action: TextInputAction.done,
                           onSubmitted: (_) => _loading ? null : _loginEmail(),
-                          suffix: GestureDetector(
+                          suffix: PasswordEye(
+                            obscured: _obscure,
                             onTap: () => setState(() => _obscure = !_obscure),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 12),
-                              child: Text(_obscure ? '🙈' : '👁️',
-                                  style: const TextStyle(fontSize: 20)),
-                            ),
                           ),
                         ),
                         const SizedBox(height: 12),
@@ -176,9 +173,13 @@ class _LoginScreenState extends State<LoginScreen> {
                           onTap: _loading ? null : _loginGoogle,
                           child: const SizedBox(
                             width: double.infinity,
-                            child: Center(
-                              child: BlockText('G  CONTINUE WITH GOOGLE',
-                                  size: 13, stroke: 3.5),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                GoogleLogo(size: 20),
+                                SizedBox(width: 10),
+                                BlockText('CONTINUE WITH GOOGLE', size: 13, stroke: 3.5),
+                              ],
                             ),
                           ),
                         ),

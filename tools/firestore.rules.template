@@ -14,9 +14,21 @@ service cloud.firestore {
     function signedIn() { return request.auth != null; }
     function isMe(uid)  { return signedIn() && request.auth.uid == uid; }
 
+    // TESTER accounts: listed by hand in the Firebase console
+    // (Firestore > testers > document id = the player's UID). Only checked
+    // when the normal economy check fails, so normal players pay nothing.
+    function isTester() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/testers/$(request.auth.uid));
+    }
+
     // ── catalog (generated from hero_items.dart / hero_roster.dart) ──
     // Unknown ids cost 999999999, so they can never be "bought".
-    function itemCoins(id) { return __ITEM_COINS__.get(id, 999999999); }
+    // ONE map of item prices. Build it once per request (with `let`): Firestore
+    // stops a request after 1,000 evaluated expressions, and building this
+    // ~100-item map seven times went over that, so every item purchase was
+    // refused. '' = an empty slot (price 0).
+    function itemPrices() { return __ITEM_COINS__; }
     function heroCoins(id) { return __HERO_COINS__.get(id, 999999999); }
     // earned heroes that need a cleared rank: hero id -> stage id
     function heroStage(id) { return __HERO_STAGE__.get(id, ''); }
@@ -100,18 +112,29 @@ service cloud.firestore {
     }
 
     // ── duel prize: only the winner of a challenge that just finished ──
+    // Only looks the challenge up when this write really claims a duel (a
+    // lookup of an empty id would make every other coin claim fail).
     function duelWinOk(uid) {
-      let path = /databases/$(database)/documents/challenges/$(nd('last_duel_id', ''));
-      let c = getAfter(path).data;
       return changed('last_duel_id')
         && nd('last_duel_id', '') is string
-        && c.winner == uid
+        && nd('last_duel_id', '').size() > 0
+        && duelPrizeOk(uid,
+             /databases/$(database)/documents/challenges/$(nd('last_duel_id', '')));
+    }
+    function duelPrizeOk(uid, path) {
+      let c = getAfter(path).data;
+      return c.winner == uid
         && c.status == 'done'
         && get(path).data.status != 'done'
         // a win by default pays only the share of the distance actually run
         && delta('coins') <= c.reward * math.min(1.0, c.progress[uid] / c.distance_km)
         && delta('coins') <= c.get('prize', 0)
-        && dailyCoinsOk();
+        && dailyCoinsOk()
+        // at most 3 paid duel wins per day (Manila day)
+        && nd('duel_prize_day', -1) == coinDay()
+        && nd('duel_prizes_today', 0)
+             == (od('duel_prize_day', -1) == coinDay() ? od('duel_prizes_today', 0) : 0) + 1
+        && nd('duel_prizes_today', 0) <= 3;
     }
 
     // ── daily streak and weekly goal gifts ──
@@ -134,14 +157,18 @@ service cloud.firestore {
 
     // ── shop: every new item / hero must be paid at (at least) catalog price ──
     // arrayUnion appends, so the NEW entries are the tail of the new array.
-    function ci(ni, j) { return j < ni.size() ? itemCoins(ni[j]) : 0; }
     // weekly pick is 25% off: pay at least 75% of the price
     function minPay(v) { return math.floor(v * 0.75); }
 
+    // Price of the (up to 7) NEW items at the tail of the list. The list is
+    // padded with '' so every index exists, and the price map is built once.
     function itemCoinsMin(ni, k) {
-      return minPay(ci(ni, k)) + minPay(ci(ni, k + 1)) + minPay(ci(ni, k + 2))
-           + minPay(ci(ni, k + 3)) + minPay(ci(ni, k + 4)) + minPay(ci(ni, k + 5))
-           + minPay(ci(ni, k + 6));
+      let m = itemPrices();
+      let p = ni.concat(['', '', '', '', '', '', '']);
+      return minPay(m.get(p[k], 999999999)) + minPay(m.get(p[k + 1], 999999999))
+           + minPay(m.get(p[k + 2], 999999999)) + minPay(m.get(p[k + 3], 999999999))
+           + minPay(m.get(p[k + 4], 999999999)) + minPay(m.get(p[k + 5], 999999999))
+           + minPay(m.get(p[k + 6], 999999999));
     }
     function heroCoinsMin(nh, k) { return k < nh.size() ? heroCoins(nh[k]) : 0; }
     function heroUnlockedByRank(nh, k) {
@@ -208,14 +235,17 @@ service cloud.firestore {
         // adds them.
         (runChange()
             ? runOk(uid)
-            : (delta('coins') <= 0 || duelWinOk(uid)
-                || streakOk() || weeklyOk() || migrateOk()))
+            : (delta('coins') <= 0 || streakOk() || weeklyOk()
+                || migrateOk() || duelWinOk(uid)))
         // crystals no longer exist: the old balance can only be cashed in
         && delta('gems') <= 0
         && nd('coins', 0) >= 0
         // nobody lowers their own totals to dodge checks
         && delta('xp') >= 0 && delta('total_km') >= 0 && delta('total_sessions') >= 0
         && stageOk(uid)
+        // the duel-prize counter only moves with a real duel win
+        && ((!changed('duel_prizes_today') && !changed('duel_prize_day'))
+            || duelWinOk(uid))
         && (!ownershipNeedsCheck() || ownershipOk())
         && nd('owned_items', []).hasAll(od('owned_items', []))
         && nd('owned_heroes', []).hasAll(od('owned_heroes', []));
@@ -262,25 +292,61 @@ service cloud.firestore {
              * 1.3 * 3.5 + 300;
     }
 
+    // ── private body data (height / weight) ──
+    function userDoc(uid) { return /databases/$(database)/documents/users/$(uid); }
+    function bodyRangesOk() {
+      return (request.resource.data.get('weight_kg', null) == null
+              || (request.resource.data.weight_kg is number
+                  && request.resource.data.weight_kg >= 20
+                  && request.resource.data.weight_kg <= 400))
+        && (request.resource.data.get('height_cm', null) == null
+              || (request.resource.data.height_cm is number
+                  && request.resource.data.height_cm >= 50
+                  && request.resource.data.height_cm <= 260));
+    }
+    function privBodyChanged() {
+      return request.resource.data.get('weight_kg', null) != resource.data.get('weight_kg', null)
+        || request.resource.data.get('height_cm', null) != resource.data.get('height_cm', null);
+    }
+    // this write is a weekly check-in: the public doc gets last_checkin_at =
+    // now in the same batch, and the previous one is 6+ days old
+    // one-time move of an old account's height / weight off the public doc
+    function movedFromPublic(uid) {
+      return 'weight_kg' in get(userDoc(uid)).data
+        && request.resource.data.get('weight_kg', null) == get(userDoc(uid)).data.weight_kg
+        && request.resource.data.get('height_cm', null)
+             == get(userDoc(uid)).data.get('height_cm', null);
+    }
+    function checkInNow(uid) {
+      return getAfter(userDoc(uid)).data.get('last_checkin_at', null) == request.time
+        && request.time >= get(userDoc(uid)).data.get('last_checkin_at', timestamp.date(2000, 1, 1))
+                            + duration.value(6, 'd');
+    }
+
     // ── users ──
     match /users/{uid} {
       allow read: if signedIn();                 // leaderboard + friend profiles
       allow create: if isMe(uid) && freshAccount();
-      allow update: if isMe(uid) && (heroSwitchOk() || economyOk(uid));
+      allow update: if isMe(uid) && (heroSwitchOk() || economyOk(uid) || isTester());
       allow delete: if isMe(uid);
 
-      // email / height / weight: only the player can read or write them
+      // email / height / weight: only the player can read or write them.
+      // Height / weight change only at the weekly check-in: the same batch
+      // must stamp last_checkin_at on the public doc, 6+ days after the last
+      // one (the app asks every 7 days). First values are always allowed.
       match /private/{doc} {
         allow read, delete: if isMe(uid);
-        allow create, update: if isMe(uid)
-          && (request.resource.data.get('weight_kg', null) == null
-              || (request.resource.data.weight_kg is number
-                  && request.resource.data.weight_kg >= 20
-                  && request.resource.data.weight_kg <= 400))
-          && (request.resource.data.get('height_cm', null) == null
-              || (request.resource.data.height_cm is number
-                  && request.resource.data.height_cm >= 50
-                  && request.resource.data.height_cm <= 260));
+        allow create: if isMe(uid) && bodyRangesOk()
+          && ((request.resource.data.get('weight_kg', null) == null
+                && request.resource.data.get('height_cm', null) == null)
+              || !('last_checkin_at' in get(userDoc(uid)).data)
+              || movedFromPublic(uid)
+              || checkInNow(uid));
+        allow update: if isMe(uid) && bodyRangesOk()
+          && (!privBodyChanged()
+              || resource.data.get('weight_kg', null) == null
+              || movedFromPublic(uid)
+              || checkInNow(uid));
       }
 
       // weekly weight history (profile chart)
@@ -295,7 +361,9 @@ service cloud.firestore {
 
       match /activities/{id} {
         allow read: if isMe(uid);
-        allow create: if isMe(uid) && activityOk(request.resource.data);
+        // testers may add history-only practice runs (TESTER TOOLS > streak)
+        allow create: if isMe(uid)
+          && (activityOk(request.resource.data) || isTester());
         allow update: if false;
         allow delete: if isMe(uid);
       }
@@ -324,6 +392,13 @@ service cloud.firestore {
         allow update: if isMe(uid);
         allow delete: if isMe(uid) || isMe(fid);   // unfriend removes both sides
       }
+    }
+
+    // ── tester list: each player may only ask "am I a tester?". Nobody can
+    //    write it from the app; add / remove testers in the Firebase console.
+    match /testers/{tid} {
+      allow get: if isMe(tid);
+      allow list, create, update, delete: if false;
     }
 
     // ── friend codes: lookup only, never listable ──
@@ -361,17 +436,26 @@ service cloud.firestore {
         && (resource == null
             || resource.data.from == request.auth.uid
             || resource.data.to == request.auth.uid);
-      allow list: if signedIn() && resource.data.to == request.auth.uid;
+      allow list: if signedIn()
+        && (resource.data.to == request.auth.uid || resource.data.from == request.auth.uid);
       allow create: if signedIn()
         && request.resource.data.from == request.auth.uid
         && rid == request.auth.uid + '_' + request.resource.data.to;
       allow update: if signedIn()
-        && (resource.data.to == request.auth.uid                 // accept
+        && (resource.data.to == request.auth.uid                 // accept / decline
             || (resource.data.from == request.auth.uid           // re-send after unfriend
                 && request.resource.data.from == request.auth.uid
-                && request.resource.data.status == 'pending'));
+                && request.resource.data.status == 'pending'
+                // after a "no", wait 24 hours before asking again
+                && (resource.data.status != 'declined'
+                    || request.time > resource.data.get('declined_at', timestamp.date(2000, 1, 1))
+                                      + duration.value(24, 'h'))));
+      // the receiver can always delete; the sender only while it is not a
+      // fresh "no" (deleting it would skip the 24 h wait)
       allow delete: if signedIn()
-        && (resource.data.to == request.auth.uid || resource.data.from == request.auth.uid);
+        && (resource.data.to == request.auth.uid
+            || (resource.data.from == request.auth.uid
+                && resource.data.status != 'declined'));
     }
 
     // ── LIVE friend duels ──

@@ -90,6 +90,12 @@ abstract final class AccountDeletion {
     });
     await step('requests', () => _deleteAll(
         db.collection('friend_requests').where('to', isEqualTo: uid)));
+    // requests I sent that are still waiting (so nobody "accepts" a deleted
+    // account later)
+    await step('sent requests', () => _deleteAll(db
+        .collection('friend_requests')
+        .where('from', isEqualTo: uid)
+        .where('status', isEqualTo: 'pending')));
     final code = data['friend_code'] as String?;
     if (code != null && code.isNotEmpty) {
       await step('friend code', () => db.collection('friend_codes').doc(code).delete());

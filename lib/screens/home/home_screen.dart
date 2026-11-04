@@ -653,7 +653,10 @@ class _QuestSlot extends StatelessWidget {
     final kmText =
         '${dailyKm.toStringAsFixed(2)} / ${quest.thresholdKm.toStringAsFixed(1)} km';
 
-    return Block(
+    // a claimed quest is greyed out
+    return Opacity(
+      opacity: claimed ? 0.6 : 1,
+      child: Block(
       color: Rb.slot,
       edge: Rb.slateEdge,
       depth: 4,
@@ -672,9 +675,9 @@ class _QuestSlot extends StatelessWidget {
               width: 44,
               height: 44,
               child: Center(
-                child: claimed
-                    ? const Icon(Icons.check, color: Colors.white, size: 24)
-                    : Icon(quest.icon, color: Colors.white, size: 24),
+                child: Icon(quest.icon,
+                    color: claimed ? const Color(0xFFA9AEB4) : Colors.white,
+                    size: 24),
               ),
             ),
           ),
@@ -697,7 +700,7 @@ class _QuestSlot extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                       child: BlockText(
                         claimed
-                            ? '✓ ${quest.coinReward} 🪙'
+                            ? 'CLAIMED'
                             : '+${quest.coinReward} 🪙',
                         size: 10,
                         stroke: 2.5,
@@ -734,6 +737,7 @@ class _QuestSlot extends StatelessWidget {
           ),
         ],
       ),
+    ),
     );
   }
 }

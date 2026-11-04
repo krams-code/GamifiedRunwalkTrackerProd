@@ -17,7 +17,7 @@ class FriendLookup {
 enum Relation { none, friend, sent, incoming, error }
 
 /// Outcome of actually sending the request (step 2, after the player confirms).
-enum AddResult { sent, accepted, error }
+enum AddResult { sent, accepted, cooldown, full, error }
 
 /// Firestore layout (see firestore_round2.rules):
 ///   users/{uid}.friend_code                  "HERO-4F7K"
@@ -128,6 +128,10 @@ class FriendsService {
     required String otherUid,
   }) async {
     try {
+      // friend list limit (like most games: keeps lists and live data fast)
+      final mine = await friends(me).count().get();
+      if ((mine.count ?? 0) >= maxFriends) return AddResult.full;
+
       // adding someone you blocked un-blocks them
       await user(me).update({'blocked_uids': FieldValue.arrayRemove([otherUid])}).catchError((_) {});
 
@@ -135,6 +139,15 @@ class FriendsService {
       if (reverse.exists && reverse.data()?['status'] == 'pending') {
         await accept(me: me, myName: myName, fromUid: otherUid);
         return AddResult.accepted;
+      }
+      // they said no: no new request for 24 hours (no request spam)
+      final own = await requests.doc('${me}_$otherUid').get();
+      final od = own.data();
+      if (od != null && od['status'] == 'declined') {
+        final at = (od['declined_at'] as Timestamp?)?.toDate();
+        if (at != null && DateTime.now().difference(at) < declineCooldown) {
+          return AddResult.cooldown;
+        }
       }
       await requests.doc('${me}_$otherUid').set({
         'from': me,
@@ -165,8 +178,18 @@ class FriendsService {
     await batch.commit();
   }
 
+  /// Most friends one player can have.
+  static const int maxFriends = 100;
+
+  /// After a "no", the same player can't ask again for this long.
+  static const Duration declineCooldown = Duration(hours: 24);
+
+  /// Kept as "declined" (not deleted) so the sender can't re-send at once.
   static Future<void> decline(String fromUid, String me) =>
-      requests.doc('${fromUid}_$me').delete();
+      requests.doc('${fromUid}_$me').update({
+        'status': 'declined',
+        'declined_at': FieldValue.serverTimestamp(),
+      });
 
   static Future<void> unfriend(String me, String other) async {
     final batch = _db.batch();
@@ -288,6 +311,9 @@ class FriendsService {
   /// "free" prizes from a partner who just closes the app.
   static const double minPrizeKm = 0.2;
 
+  /// Duel wins per day that pay coins (more wins still count, for fun).
+  static const int duelPrizesPerDay = 3;
+
   static int prizeFor(Map<String, dynamic> d, double myKm,
       {required bool finished}) {
     final reward = (d['reward'] as num?)?.toInt() ?? 0;
@@ -303,8 +329,15 @@ class FriendsService {
     final d = ch.data()!;
     final u = await txn.get(user(me));
     final ud = u.data() ?? <String, dynamic>{};
-    final prize =
-        RunSaver.capToday(ud, prizeFor(d, km, finished: finished));
+    // only the first [duelPrizesPerDay] duel wins of a day pay coins, so two
+    // friends can't farm coins with back-to-back 1 km duels
+    final day = RunSaver.coinDay();
+    final paidToday = (ud['duel_prize_day'] as num?)?.toInt() == day
+        ? ((ud['duel_prizes_today'] as num?)?.toInt() ?? 0)
+        : 0;
+    final prize = paidToday >= duelPrizesPerDay
+        ? 0
+        : RunSaver.capToday(ud, prizeFor(d, km, finished: finished));
     txn.update(ch.reference, {
       'status': 'done',
       'winner': me,
@@ -317,6 +350,8 @@ class FriendsService {
       txn.update(user(me), {
         'coins': FieldValue.increment(prize),
         ...RunSaver.coinsTodayFields(ud, prize),
+        'duel_prize_day': day,
+        'duel_prizes_today': paidToday + 1,
         'last_duel_id': ch.id, // rules check the prize against this challenge
       });
     }
@@ -368,24 +403,32 @@ class FriendsService {
 
   // ───────────────────────── weekly km (for "friends this week") ─────────────────────────
 
-  /// Fields to merge into the user doc when a run of [km] is saved.
-  /// [userData] is the doc as read inside the same transaction.
-  static Map<String, dynamic> weekFields(Map<String, dynamic> userData, double km) {
+  /// Week / month km for the leaderboards. [at] = when the run happened: a
+  /// run that reaches the server late (for example run on Sunday, synced on
+  /// Monday) is only added to the week and month it was really run in, and
+  /// never to an older period that is already over.
+  static Map<String, dynamic> weekFields(Map<String, dynamic> userData, double km,
+      {DateTime? at}) {
     final now = DateTime.now();
-    final key = Weekly.key(now);
-    final same = userData['week_key'] == key;
-    final prev = same ? ((userData['week_km'] as num?)?.toDouble() ?? 0) : 0.0;
+    final when = at ?? now;
+    final out = <String, dynamic>{'last_run_at': FieldValue.serverTimestamp()};
+    final key = Weekly.key(when);
+    if (key == Weekly.key(now)) {
+      final same = userData['week_key'] == key;
+      final prev = same ? ((userData['week_km'] as num?)?.toDouble() ?? 0) : 0.0;
+      out['week_key'] = key;
+      out['week_km'] = double.parse((prev + km).toStringAsFixed(3));
+    }
     // monthly leaderboard
-    final mKey = '${now.year}-${now.month.toString().padLeft(2, '0')}';
-    final mSame = userData['month_key'] == mKey;
-    final mPrev = mSame ? ((userData['month_km'] as num?)?.toDouble() ?? 0) : 0.0;
-    return {
-      'week_key': key,
-      'week_km': double.parse((prev + km).toStringAsFixed(3)),
-      'month_key': mKey,
-      'month_km': double.parse((mPrev + km).toStringAsFixed(3)),
-      'last_run_at': FieldValue.serverTimestamp(),
-    };
+    String month(DateTime d) => '${d.year}-${d.month.toString().padLeft(2, '0')}';
+    final mKey = month(when);
+    if (mKey == month(now)) {
+      final mSame = userData['month_key'] == mKey;
+      final mPrev = mSame ? ((userData['month_km'] as num?)?.toDouble() ?? 0) : 0.0;
+      out['month_key'] = mKey;
+      out['month_km'] = double.parse((mPrev + km).toStringAsFixed(3));
+    }
+    return out;
   }
 
   // ───────────────────────── chat ─────────────────────────

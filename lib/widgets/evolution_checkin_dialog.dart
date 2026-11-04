@@ -5,7 +5,6 @@ import 'package:flutter/services.dart';
 
 import '../models/body_composition.dart';
 import '../models/character_profile.dart';
-import '../models/hero_items.dart';
 import '../models/hero_roster.dart';
 import '../state/evolution_state.dart';
 import 'block_ui.dart';
@@ -781,8 +780,12 @@ class _EvoCard extends StatelessWidget {
                           equippedClothes: clothes,
                           height: 150,
                           gender: p.gender,
-                          heroId: heroIdOf(data),
-                          outfit: outfitOf(data),
+                          // Always the main hero (SPROUT / SPROUT GIRL by
+                          // gender) with no gear, even when a costume is
+                          // worn, so the body-size change is easy to see.
+                          // The player's own look is untouched.
+                          heroId: kDefaultHeroId,
+                          outfit: const <String, String>{},
                         ),
                       ),
               ),

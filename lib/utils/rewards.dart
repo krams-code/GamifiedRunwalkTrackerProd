@@ -21,6 +21,16 @@ abstract final class RunRewards {
   /// Highest mode multiplier in the game (rules use it as a ceiling).
   static const double maxMult = 3.5;
 
+  /// Shortest run that counts (saved, rewards, streak day, badges).
+  static const double minCountKm = 0.2;
+
+  /// Average MOVING speed above this is not running (bike / vehicle): the run
+  /// is not counted. Good club runners average about 15 km/h on a 5K.
+  static const double maxAvgRunKmh = 16;
+
+  /// Coins inside each Pace Keeper loot chest (paid with the run).
+  static const int lootChestCoins = 150;
+
   /// Highest pace multiplier (see [intensity]).
   static const double maxIntensity = 1.3;
 

@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:hakbanghero/widgets/google_logo.dart';
 import 'package:hakbanghero/services/usernames.dart';
 import 'package:hakbanghero/services/private_data.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -310,9 +311,13 @@ class _SignupScreenState extends State<SignupScreen> {
                           onTap: _loading ? null : _signupGoogle,
                           child: const SizedBox(
                             width: double.infinity,
-                            child: Center(
-                              child: BlockText('G  SIGN UP WITH GOOGLE',
-                                  size: 13, stroke: 3.5),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                GoogleLogo(size: 20),
+                                SizedBox(width: 10),
+                                BlockText('SIGN UP WITH GOOGLE', size: 13, stroke: 3.5),
+                              ],
                             ),
                           ),
                         ),
@@ -344,13 +349,8 @@ class _SignupScreenState extends State<SignupScreen> {
     );
   }
 
-  Widget _eye(bool obscured, VoidCallback onTap) => GestureDetector(
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Text(obscured ? '🙈' : '👁️', style: const TextStyle(fontSize: 20)),
-        ),
-      );
+  Widget _eye(bool obscured, VoidCallback onTap) =>
+      PasswordEye(obscured: obscured, onTap: onTap);
 
   /// Live checklist + 6-segment power bar.
   Widget _strengthMeter() {

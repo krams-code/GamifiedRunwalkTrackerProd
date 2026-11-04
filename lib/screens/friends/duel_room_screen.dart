@@ -372,7 +372,7 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(won ? '\u{1F3C6}' : '\u{1F624}', style: const TextStyle(fontSize: 56)),
+                EmojiText(won ? '\u{1F3C6}' : '\u{1F624}', style: const TextStyle(fontSize: 56)),
                 const SizedBox(height: 6),
                 BlockText(won ? 'YOU WON!' : '$_otherName WON!'.toUpperCase(),
                     size: 26, stroke: 5.5, color: won ? Rb.gold : Colors.white,
@@ -393,6 +393,17 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
                 if (won) ...[
                   const SizedBox(height: 10),
                   BlockText('+\u{1FA99}$prize', size: 22, stroke: 5, color: Rb.neon),
+                  if (prize == 0 && !byDefault)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 4),
+                      child: BlockText(
+                        'Daily duel prizes used up (${FriendsService.duelPrizesPerDay} a day). '
+                        'The win still counts!',
+                        size: 10.5,
+                        stroke: 2.5,
+                        align: TextAlign.center,
+                      ),
+                    ),
                 ],
                 const SizedBox(height: 16),
                 if (!byDefault || !won)
@@ -932,7 +943,7 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
                   const Positioned(
                     right: 0,
                     top: 0,
-                    child: Text('\u{1F3C1}', style: TextStyle(fontSize: 22)),
+                    child: EmojiText('\u{1F3C1}', style: TextStyle(fontSize: 22)),
                   ),
                   AnimatedPositioned(
                     duration: const Duration(milliseconds: 600),
