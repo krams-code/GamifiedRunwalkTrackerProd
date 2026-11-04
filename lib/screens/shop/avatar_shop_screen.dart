@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../widgets/game_notice.dart';
 import '../character/hero_picker_screen.dart' show saveErrorText;
@@ -15,6 +14,7 @@ import '../../models/hero_roster.dart';
 import '../../services/sound.dart';
 import '../../state/evolution_state.dart';
 import '../../utils/activity_snapshot.dart';
+import '../../utils/fast_save.dart';
 import '../../utils/weekly.dart';
 import '../../widgets/block_ui.dart';
 import '../../widgets/scene_backdrop.dart';
@@ -145,37 +145,33 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
     try {
       final ref = FirebaseFirestore.instance.collection('users').doc(uid);
       {
-        final snap = await ref.get(const GetOptions(
-            serverTimestampBehavior: ServerTimestampBehavior.estimate));
+        // the phone's copy is up to date (instant); a claim made a moment
+        // ago is still "pending": its estimated time counts
+        final snap = await localFirst(ref);
         final done = (snap.data()?['streak_claims'] as List?)?.contains(key) ?? false;
         if (done) throw 'claimed';
         // the server allows one streak reward every 12 hours
-        // a claim made a moment ago is still "pending" on the phone: use
-        // its estimated time instead of treating it as "never claimed"
         final last = (snap.data()?['streak_claim_at'] as Timestamp?)?.toDate();
         if (last != null) {
           final next = last.add(const Duration(hours: 12));
           if (DateTime.now().isBefore(next)) throw next;
         }
-        // plain write: the coins show up on screen at once
-        final write = ref.update({
-          'coins': FieldValue.increment(bonus),
-          'streak_claims': FieldValue.arrayUnion([key]),
-          'streak_claim_at': FieldValue.serverTimestamp(), // rules: 1 per 12 h
+        // the coins show up at once; the server still checks the claim and
+        // takes them back (with a message) if it is refused
+        saveInBackground(
+            ref.update({
+              'coins': FieldValue.increment(bonus),
+              'streak_claims': FieldValue.arrayUnion([key]),
+              'streak_claim_at': FieldValue.serverTimestamp(), // rules: 1 per 12 h
+            }), (e) {
+          if (mounted) {
+            Sound.I.play(Sfx.error);
+            showGameAlert(context,
+                title: 'NOT CLAIMED',
+                message: 'The server refused this claim, so the coins were '
+                    'taken back.\n\n${saveErrorText(e, 'Try again.')}');
+          }
         });
-        // wait for the server's answer, so "+COINS" only shows for a claim
-        // that really counted (a slow connection keeps it queued)
-        try {
-          await write.timeout(const Duration(seconds: 8));
-        } on TimeoutException {
-          write.catchError((Object e) {
-            debugPrint('streak claim refused later: $e');
-            if (mounted) {
-              Sound.I.play(Sfx.error);
-              _snack(saveErrorText(e, 'Claim failed. Try again.'));
-            }
-          });
-        }
       }
       if (mounted) setState(() => _claiming = false);
       if (mounted) {
@@ -475,7 +471,7 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
       // screen instantly; the server rules still check the price, and undo
       // it if anything is wrong.
       {
-        final snap = await ref.get();
+        final snap = await localFirst(ref);
         final fresh = _Data.from(snap.data() ?? <String, dynamic>{});
 
         var coins = 0;
@@ -505,28 +501,10 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
         if (coins > 0) up['coins'] = FieldValue.increment(-coins);
         if (newItems.isNotEmpty) up['owned_items'] = FieldValue.arrayUnion(newItems);
         if (newHero != null) up['owned_heroes'] = FieldValue.arrayUnion([newHero]);
-        // The coins drop on screen at once (local write). Wait a few
-        // seconds for the server's yes / no, so "PURCHASED!" is only shown
-        // for a purchase that really went through. With a slow connection
-        // the write stays queued and is checked when it reaches the server.
-        var refused = false;
-        final write = ref.update(up);
-        try {
-          await write.timeout(const Duration(seconds: 8));
-        } on TimeoutException {
-          write.catchError((Object e) {
-            debugPrint('purchase refused later: $e');
-            if (mounted) {
-              Sound.I.play(Sfx.error);
-              showGameAlert(context,
-                  title: 'NOT BOUGHT',
-                  message: 'The server refused this purchase, so your coins '
-                      'were given back.\n\n${saveErrorText(e, 'Try again.')}');
-            }
-          });
-        } catch (e) {
-          debugPrint('purchase refused: $e');
-          refused = true;
+        // The coins drop and the items appear at once (local write). The
+        // server rules still check the price; a refused purchase is undone
+        // by Firestore and the player is told.
+        saveInBackground(ref.update(up), (e) {
           if (mounted) {
             Sound.I.play(Sfx.error);
             showGameAlert(context,
@@ -534,8 +512,7 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
                 message: 'The server refused this purchase, so your coins '
                     'were given back.\n\n${saveErrorText(e, 'Try again.')}');
           }
-        }
-        if (refused) return;
+        });
       }
       if (mounted) setState(() => _buying = false);
       if (bought.isEmpty) {

@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import '../../utils/fast_save.dart';
 import '../../widgets/game_notice.dart';
 import '../../widgets/reward_popup.dart';
 import '../../services/sound.dart';
@@ -74,10 +75,12 @@ class _HeroPickerScreenState extends State<HeroPickerScreen> {
     if (doc == null || _saving) return;
     setState(() => _saving = true);
     try {
-      await doc.set({
+      // shows at once; the server is not waited for (it undoes a refusal)
+      final write = doc.set({
         'hero_id': h.id,
         'owned_heroes': FieldValue.arrayUnion([h.id]),
       }, SetOptions(merge: true));
+      saveInBackground(write, (e) => _snack(saveErrorText(e)));
       if (widget.firstTime && mounted) {
         Navigator.of(context).pop(true);
         return;
@@ -98,15 +101,23 @@ class _HeroPickerScreenState extends State<HeroPickerScreen> {
     if (doc == null || _saving) return;
     setState(() => _saving = true);
     try {
-      await FirebaseFirestore.instance.runTransaction((txn) async {
-        final snap = await txn.get(doc);
-        final coins = (snap.data()?['coins'] as num?)?.toInt() ?? 0;
-        if (coins < h.coinPrice) throw 'coins';
-        txn.update(doc, {
-          'coins': FieldValue.increment(-h.coinPrice),
-          'owned_heroes': FieldValue.arrayUnion([h.id]),
-          'hero_id': h.id,
-        });
+      // phone's copy (instant) instead of a server round trip; the rules
+      // still check the price and undo a refused purchase
+      final snap = await localFirst(doc);
+      final coins = (snap.data()?['coins'] as num?)?.toInt() ?? 0;
+      if (coins < h.coinPrice) throw 'coins';
+      saveInBackground(
+          doc.update({
+            'coins': FieldValue.increment(-h.coinPrice),
+            'owned_heroes': FieldValue.arrayUnion([h.id]),
+            'hero_id': h.id,
+          }), (e) {
+        if (mounted) {
+          showGameAlert(context,
+              title: 'NOT BOUGHT',
+              message: 'The server refused this purchase, so your coins '
+                  'were given back.\n\n${saveErrorText(e, 'Try again.')}');
+        }
       });
       if (mounted) {
         await showRewardPopup(context,

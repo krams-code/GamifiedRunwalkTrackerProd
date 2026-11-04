@@ -1,4 +1,4 @@
-import '../utils/quick_get.dart';
+import '../utils/fast_save.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'game_notice.dart';
 import 'reward_popup.dart';
@@ -39,7 +39,7 @@ class _WeeklyGoalCardState extends State<WeeklyGoalCard> {
   Future<void> _load({GoalMode? forceMode}) async {
     if (_uid == null) return;
     try {
-      final user = (await quickDoc(_ref)).data() ?? {};
+      final user = (await localFirst(_ref)).data() ?? {};
       final key = Weekly.key(DateTime.now());
       // Research log: remember what target this player was given this week.
       final log = user['weekly_goal_log'];
@@ -98,7 +98,7 @@ class _WeeklyGoalCardState extends State<WeeklyGoalCard> {
     setState(() => _busy = true);
     try {
       {
-        final snap = await _ref.get();
+        final snap = await localFirst(_ref); // instant: the phone's copy
         if ((snap.data()?['weekly_goal_claimed'] as String?) == key) throw 'done';
         // plain write: the coins show up on screen at once
         _ref.update({

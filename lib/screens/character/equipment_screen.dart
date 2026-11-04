@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import '../../utils/fast_save.dart';
 import '../../widgets/game_notice.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -37,8 +38,6 @@ class EquipmentScreen extends StatefulWidget {
 class _EquipmentScreenState extends State<EquipmentScreen> {
   HeroSlot _slot = HeroSlot.head;
   RigPose _pose = RigPose.idle;
-  bool _busy = false;
-
   DocumentReference<Map<String, dynamic>>? get _ref {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     return uid == null
@@ -51,32 +50,23 @@ class _EquipmentScreenState extends State<EquipmentScreen> {
     showGameNotice(context, msg);
   }
 
+  // Wearing / removing shows at once (local write); the server is not
+  // waited for. If it refuses, Firestore puts the old look back.
   Future<void> _wear(HeroItem i, bool on) async {
     final ref = _ref;
-    if (ref == null || _busy) return;
-    setState(() => _busy = true);
-    try {
-      await ref.update({
-        'hero_outfit.${i.slot.name}': on ? i.id : FieldValue.delete(),
-      });
-    } catch (_) {
-      _snack('Could not save. Try again.');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
+    if (ref == null) return;
+    saveInBackground(
+        ref.update({
+          'hero_outfit.${i.slot.name}': on ? i.id : FieldValue.delete(),
+        }),
+        (_) => _snack('Could not save. Try again.'));
   }
 
   Future<void> _takeOffSlot(HeroSlot s) async {
     final ref = _ref;
-    if (ref == null || _busy) return;
-    setState(() => _busy = true);
-    try {
-      await ref.update({'hero_outfit.${s.name}': FieldValue.delete()});
-    } catch (_) {
-      _snack('Could not save. Try again.');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
+    if (ref == null) return;
+    saveInBackground(ref.update({'hero_outfit.${s.name}': FieldValue.delete()}),
+        (_) => _snack('Could not save. Try again.'));
   }
 
   /// Gear is only drawn on SPROUT. Tapping gear while wearing a costume asks
@@ -101,22 +91,18 @@ class _EquipmentScreenState extends State<EquipmentScreen> {
 
   Future<void> _switchHero(HeroDef h, {bool quiet = false}) async {
     final ref = _ref;
-    if (ref == null || _busy) return;
-    setState(() => _busy = true);
-    try {
-      await ref.set({
-        'hero_id': h.id,
-        'owned_heroes': FieldValue.arrayUnion([h.id]),
-      }, SetOptions(merge: true));
-      if (!quiet) {
-        _snack(h.costume
-            ? 'You are now wearing the ${h.name} costume!'
-            : '${h.name} is back as your hero!');
-      }
-    } catch (_) {
-      _snack('Could not save. Try again.');
-    } finally {
-      if (mounted) setState(() => _busy = false);
+    if (ref == null) return;
+    // shows at once; the server is not waited for (it undoes a refusal)
+    saveInBackground(
+        ref.set({
+          'hero_id': h.id,
+          'owned_heroes': FieldValue.arrayUnion([h.id]),
+        }, SetOptions(merge: true)),
+        (_) => _snack('Could not save. Try again.'));
+    if (!quiet) {
+      _snack(h.costume
+          ? 'You are now wearing the ${h.name} costume!'
+          : '${h.name} is back as your hero!');
     }
   }
 
@@ -373,7 +359,7 @@ class _EquipmentScreenState extends State<EquipmentScreen> {
             depth: 4,
             radius: 10,
             padding: const EdgeInsets.symmetric(vertical: 10),
-            onTap: _busy ? null : () => _takeOffSlot(_slot),
+            onTap: () => _takeOffSlot(_slot),
             child: Center(
                 child: BlockText('TAKE OFF ${_slot.label}', size: 13, stroke: 3)),
           ),
@@ -394,7 +380,7 @@ class _EquipmentScreenState extends State<EquipmentScreen> {
         depth: 4,
         radius: 12,
         padding: const EdgeInsets.all(6),
-        onTap: active || _busy ? null : () => _switchHero(h),
+        onTap: active ? null : () => _switchHero(h),
         child: SizedBox(
           width: 56,
           child: Column(
@@ -420,9 +406,7 @@ class _EquipmentScreenState extends State<EquipmentScreen> {
           depth: 4,
           radius: 12,
           padding: const EdgeInsets.all(6),
-          onTap: _busy
-              ? null
-              : (heroIsCostume(heroId) ? () => _askWear(i, heroId) : () => _wear(i, !on)),
+          onTap: heroIsCostume(heroId) ? () => _askWear(i, heroId) : () => _wear(i, !on),
           child: Column(
             children: [
               AspectRatio(

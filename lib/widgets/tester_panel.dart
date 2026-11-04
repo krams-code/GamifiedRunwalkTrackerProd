@@ -32,9 +32,27 @@ class _TesterPanelState extends State<_TesterPanel> {
   bool _busy = false;
 
   /// Runs [job], then shows [done] (or why it failed).
-  Future<void> _run(String done, Future<void> Function(String uid) job) async {
+  ///
+  /// [instant] tools are plain saves: the change shows on screen at once and
+  /// the server is not waited for. If it refuses, Firestore undoes the
+  /// change and the reason is shown.
+  Future<void> _run(String done, Future<void> Function(String uid) job,
+      {bool instant = true}) async {
     final uid = _uid;
     if (uid == null || _busy) return;
+    if (instant) {
+      job(uid).catchError((Object e) {
+        debugPrint('tester tool refused: $e');
+        if (mounted) {
+          showGameAlert(context,
+              title: 'NOT DONE',
+              message: '${RunSaver.describe(e)}\n\nIs this account in the '
+                  'Firestore "testers" list, and are the newest rules deployed?');
+        }
+      });
+      showGameToast(context, done, kind: NoticeKind.success);
+      return;
+    }
     setState(() => _busy = true);
     try {
       await job(uid).timeout(RunSaver.timeout);
@@ -240,12 +258,12 @@ class _TesterPanelState extends State<_TesterPanel> {
                           _run('A 3 km test run was saved (XP, coins, quests '
                               'and weekly goal count it).', (u) async {
                             await TesterMode.addTestRun(u, km: 3, minutes: 20);
-                          });
+                          }, instant: false);
                         }, color: Rb.green, edge: Rb.greenEdge),
                         _button('ADD 6 KM RUN', () {
                           _run('A 6 km test run was saved.', (u) async {
                             await TesterMode.addTestRun(u, km: 6, minutes: 40);
-                          });
+                          }, instant: false);
                         }, color: Rb.green, edge: Rb.greenEdge),
                       ),
                       _pair(

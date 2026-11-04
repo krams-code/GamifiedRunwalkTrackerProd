@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/run_mode.dart';
+import '../utils/fast_save.dart';
 import '../utils/player_stats.dart';
 import '../utils/rewards.dart';
 import 'run_saver.dart';
@@ -72,7 +73,10 @@ abstract final class TesterMode {
 
   /// Make every "wait" open again: streak reward (12 h), weekly goal reward,
   /// today's daily quests, the daily coin cap and the weekly check-in.
-  static Future<void> resetTimers(String uid) => _user(uid).update({
+  static Future<void> resetTimers(String uid) =>
+      _user(uid).update(_timersCleared());
+
+  static Map<String, dynamic> _timersCleared() => {
         ..._flag,
         'streak_claim_at': FieldValue.delete(),
         'streak_claims': <String>[],
@@ -84,30 +88,28 @@ abstract final class TesterMode {
         // a check-in 8 days ago: the weekly check-in opens right away
         'last_checkin_at': Timestamp.fromDate(
             DateTime.now().subtract(const Duration(days: 8))),
-      });
+      };
 
   /// Back to a brand-new player's progress: no ranks, level 1, 0 km, 100
   /// coins, every timer open. Bought items, the hero and run history stay.
-  static Future<void> resetProgress(String uid) async {
-    await _user(uid).update({
-      ..._flag,
-      'stage_records': <String, dynamic>{},
-      'xp': 0,
-      'total_km': 0.0,
-      'coins': 100,
-      'loot_chests': 0,
-    });
-    await resetTimers(uid);
-  }
+  static Future<void> resetProgress(String uid) => _user(uid).update({
+        ..._timersCleared(),
+        'stage_records': <String, dynamic>{},
+        'xp': 0,
+        'total_km': 0.0,
+        'coins': 100,
+        'loot_chests': 0,
+      });
 
   /// Save a finished run of [km] in [minutes] that ended just now, through
   /// the NORMAL run save (XP, coins, daily quests, weekly goal, badges).
   static Future<RunSaveResult> addTestRun(String uid,
       {double km = 3.0, int minutes = 20}) async {
-    await _user(uid).update(_flag);
+    // (no waiting: the flag is saved in the background)
+    _user(uid).update(_flag).catchError((Object _) {});
     // runs may not overlap: if the last run ended less than [minutes] ago,
     // this test run starts right after it
-    final snap = await _user(uid).get();
+    final snap = await localFirst(_user(uid));
     final lastEnd = (snap.data()?['last_run_end'] as Timestamp?)?.toDate();
     var start = DateTime.now().subtract(Duration(minutes: minutes));
     if (lastEnd != null && start.isBefore(lastEnd)) {
@@ -156,10 +158,10 @@ abstract final class TesterMode {
   /// day streak and streak rewards can be tested. History only: these runs
   /// give no XP or coins.
   static Future<void> addStreakDays(String uid, int days) async {
-    await _user(uid).update(_flag);
     final acts = _user(uid).collection('activities');
     final now = DateTime.now();
     final batch = _db.batch();
+    batch.update(_user(uid), _flag);
     final stamp = now.millisecondsSinceEpoch % 100000;
     for (var i = 1; i <= days; i++) {
       final d = now.subtract(Duration(days: i));

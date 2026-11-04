@@ -242,12 +242,13 @@ class EvolutionState {
         'last_checkin_at': FieldValue.serverTimestamp(),
         if (award) 'endurance_bonus': FieldValue.increment(enduranceBonus),
       });
-      await batch.commit().timeout(
-        // Offline: the write is queued and syncs later. Don't hang the
-        // dialog on a server ack that may be minutes away.
-        const Duration(seconds: 6),
-        onTimeout: () {},
-      );
+      // Don't wait for the server: the new look is already saved on the
+      // phone and shows everywhere at once. If the server refuses it,
+      // Firestore puts the old values back and so do we.
+      batch.commit().catchError((Object e) {
+        debugPrint('check-in refused: $e');
+        composition.value = before;
+      });
     } catch (_) {
       composition.value = before; // rejected -> roll back
       rethrow;
