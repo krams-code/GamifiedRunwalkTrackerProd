@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 
 import '../models/outfit_catalog.dart';
+import 'legal_consent.dart';
 
 /// Result of a Google sign-in attempt.
 class GoogleAuthResult {
@@ -21,7 +22,8 @@ class GoogleAuthResult {
 class GoogleAuth {
   GoogleAuth._();
 
-  static Future<GoogleAuthResult> signIn() async {
+  static Future<GoogleAuthResult> signIn({bool termsAccepted = false,
+      bool privacyAcknowledged = false}) async {
     final provider = GoogleAuthProvider()..addScope('email');
     try {
       final auth = FirebaseAuth.instance;
@@ -32,7 +34,8 @@ class GoogleAuth {
       if (user == null) {
         return const GoogleAuthResult(message: 'Google sign-in failed. Try again.');
       }
-      await ensureUserDoc(user, user.displayName ?? 'Hero');
+      await ensureUserDoc(user, user.displayName ?? 'Hero',
+          termsAccepted: termsAccepted, privacyAcknowledged: privacyAcknowledged);
       return GoogleAuthResult(user: user);
     } on FirebaseAuthException catch (e) {
       const cancelCodes = {
@@ -65,13 +68,15 @@ class GoogleAuth {
 
   /// Creates the users/{uid} document for a first-time account (idempotent).
   static Future<void> ensureUserDoc(User user, String username,
-      {String? gender}) async {
+      {String? gender, bool termsAccepted = false,
+      bool privacyAcknowledged = false}) async {
     final ref = FirebaseFirestore.instance.collection('users').doc(user.uid);
     final doc = await ref.get();
     if (doc.exists) return;
     // one player per name: "Mark" may become "Mark4821"
     final name = await Usernames.claimFree(user.uid, username);
-    await ref.set({
+    final batch = FirebaseFirestore.instance.batch();
+    batch.set(ref, {
       'username': name,
       'username_key': Usernames.key(name),
       'gender': gender,
@@ -84,6 +89,7 @@ class GoogleAuth {
       'total_sessions': 0,
       'created_at': FieldValue.serverTimestamp(),
       'character_created': false,
+      LegalConsent.requiredField: true,
       'skin_tone': '#E0AC69',
       ...StarterPack.toFirestore(),
       'owned_items': StarterPack.ownedItems,
@@ -91,8 +97,10 @@ class GoogleAuth {
       'body_tier': 'average',
     });
     // private: only this player can read it
-    await PrivateData.ref(user.uid)
-        .set({'email': user.email}, SetOptions(merge: true))
-        .catchError((Object _) {});
+    batch.set(PrivateData.ref(user.uid), {'email': user.email}, SetOptions(merge: true));
+    if (termsAccepted && privacyAcknowledged) {
+      batch.set(LegalConsent.ref(user.uid), LegalConsent.record(true, true));
+    }
+    await batch.commit();
   }
 }

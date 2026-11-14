@@ -19,7 +19,9 @@ import 'package:hakbanghero/models/activity_model.dart';
 import 'package:hakbanghero/models/daily_quest_definitions.dart';
 import 'package:hakbanghero/models/ghost_run.dart';
 import '../models/run_mode.dart';
+import '../models/run_summary_export.dart';
 import '../services/run_saver.dart';
+import '../services/duel_coordinator.dart';
 import '../services/run_checkpoint.dart';
 import '../services/sound.dart';
 import '../utils/rewards.dart';
@@ -161,7 +163,7 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
   @override
   void initState() {
     super.initState();
-    Presence.I.holdActive(true); // a run in progress is never "idle"
+    // Presence is held only after an activity slot is reserved.
     _loadGhost();
 
     _challenge.onEvent = (e) => ChallengeAudio.instance.onEvent(e);
@@ -265,7 +267,14 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
   // ── PRE-RUN → WARM-UP ─────────────────────────────────────────────────────
 
   /// A mode was chosen in the overlay: remember it and head to the warm-up.
-  void _onModePicked(RunMode mode) {
+  bool _reservingActivity = false;
+  Future<void> _onModePicked(RunMode mode) async {
+    if (_reservingActivity || _phase != _Phase.preRun) return;
+    _reservingActivity = true;
+    final reserved = await DuelCoordinator.I.beginSolo();
+    _reservingActivity = false;
+    if (!mounted) return;
+    if (!reserved) { _showSnack('Could not start: another activity is open or your connection is unavailable.'); return; }
     setState(() {
       _applyMode(mode);
       // Stage ranks get a briefing card first; Endless goes straight on.
@@ -715,6 +724,11 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
     if (uid == null) return;
     final cp = await RunCheckpoint.load(uid);
     if (cp == null || !mounted || _phase != _Phase.preRun) return;
+    if (!await DuelCoordinator.I.beginSolo()) {
+      if (mounted) _showSnack('Could not restore the run while another activity is open or offline.');
+      return;
+    }
+    if (!mounted) { await DuelCoordinator.I.endSolo(); return; }
     final canResume =
         DateTime.now().difference(cp.savedAt) <= RunCheckpoint.resumeWindow;
     final mode = RunMode.byId(cp.modeId) ?? kEndless;
@@ -776,6 +790,7 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
     );
     if (!mounted) return;
     if (pick == 'discard' || pick == null) {
+      await DuelCoordinator.I.endSolo();
       await RunCheckpoint.clear();
       return;
     }
@@ -1171,6 +1186,13 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
 
     _savedOffline = false;
     _saveError = null;
+    _saveNotice = null;
+    _awardedXp = 0;
+    _awardedCoins = 0;
+    _exportOwnerUid = null;
+    _exportRunId = null;
+    _retainedLocally = false;
+    var safeToClear = !counted;
     final user = FirebaseAuth.instance.currentUser;
     if (user != null && counted) {
       final fields = session.toFirestore()
@@ -1195,14 +1217,33 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
         elapsedSeconds: _elapsedSeconds,
         interval: interval,
       );
-      // cloud copy first: the run is safe on the account even if this
-      // device never manages to finish the save
+      _exportOwnerUid = user.uid;
+      _exportRunId = payload.id;
+      // Retain the original payload before attempting the transaction. A tab
+      // reload or an interrupted request must not lose the finished rewards.
+      try {
+        await RunOutbox.enqueue(payload);
+        _retainedLocally = true;
+        safeToClear = true;
+      } catch (e) {
+        debugPrint('Run could not be retained locally: $e');
+      }
       RunCloud.stash(payload);
       try {
         final xpBefore = (UserDoc.instance.snapshotFor(user.uid)?.data()?['xp']
                 as num?)
             ?.toInt();
         final r = await RunSaver.save(payload).timeout(RunSaver.timeout);
+        safeToClear = true;
+        _awardedXp = r.awardedXp;
+        _awardedCoins = r.awardedCoins;
+        if (r.late) _saveNotice = 'HISTORY ONLY: this run overlaps a run already counted. No rewards added.';
+        if (r.duplicate) _saveNotice = 'ALREADY SAVED: no rewards were added twice.';
+        try {
+          await RunOutbox.remove(user.uid, payload.id);
+        } catch (e) {
+          debugPrint('Saved run remains queued for a duplicate-safe retry: $e');
+        }
         RunCloud.done(user.uid, payload.id);
         if (xpBefore != null && !r.duplicate && !r.late) {
           final before = LevelProgress.fromXp(xpBefore).level;
@@ -1228,14 +1269,22 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
         _savedOffline = true;
         _saveError = RunSaver.describe(e);
         RunOutbox.lastError.value = _saveError;
-        await RunOutbox.enqueue(payload);
-        if (_mode.isStage && _outcomeGood) {
-          _stageStars = _mode.isTrial ? 0 : _mode.starsFor(_elapsedSeconds);
+        if (!_retainedLocally) {
+          try {
+            await RunOutbox.enqueue(payload);
+            _retainedLocally = true;
+            safeToClear = true;
+          } catch (storageError) {
+            _saveError = '$_saveError; local storage also failed: $storageError';
+            RunOutbox.lastError.value = _saveError;
+          }
         }
       }
+    } else if (counted) {
+      _savedOffline = true;
+      _saveError = 'You are signed out. This run has not been saved.';
     }
-    // the run is safe (saved, queued on the phone and in the cloud)
-    await RunCheckpoint.clear();
+    if (safeToClear) await RunCheckpoint.clear();
     _frozenClock = false;
 
     if (mounted) {
@@ -1253,7 +1302,8 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
   /// Jingle for the finished run, then little extras for what it earned.
   void _playResultSounds() {
     Sound.I.music(null); // quiet the track so the jingle is heard
-    final won = _notCounted == null && (_outcome == null || _outcomeGood);
+    final won = !_savedOffline && _saveNotice == null &&
+        _notCounted == null && (_outcome == null || _outcomeGood);
     Sound.I.play(won ? Sfx.success : Sfx.fail);
     Future<void>.delayed(const Duration(milliseconds: 1300), () {
       if (_unlockedRank != null) {
@@ -1269,16 +1319,25 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
   void _showSummarySheet(
     ActivitySession session,
   ) {
+    RunSummaryExport? confirmed;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       isDismissible: false,
-      builder: (_) => SessionSummarySheet(
+      builder: (_) => StatefulBuilder(builder: (_, update) => SessionSummarySheet(
         session: session,
         isSaving: _isSaving,
-        queued: _savedOffline,
-        saveError: _saveError,
+        queued: confirmed == null && _savedOffline,
+        saveError: confirmed == null ? _saveError : null,
+        retainedLocally: _retainedLocally,
+        saveNotice: confirmed?.result == 'HISTORY ONLY'
+            ? 'HISTORY ONLY: this run overlaps a run already counted. No rewards added.' : _saveNotice,
+        awardedXp: confirmed?.xp ?? (_savedOffline ? null : _awardedXp),
+        awardedCoins: confirmed?.coins ?? (_savedOffline ? null : _awardedCoins),
+        exportOwnerUid: _exportOwnerUid,
+        exportRunId: _exportRunId,
+        onExportConfirmed: (value) => update(() => confirmed = value),
         notCounted: _notCounted,
         intervalStats: _intervalStats,
         intervalNewBest: _intervalNewBest,
@@ -1295,13 +1354,19 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
         unlockedRank: _unlockedRank,
         onNextRank: _unlockedRank == null ? null : _onNextRank,
         onDone: _onSummaryDone,
-      ),
+      )),
     );
   }
 
   bool _tutorialLaunching = false;
   bool _savedOffline = false;
   String? _saveError;
+  String? _saveNotice;
+  bool _retainedLocally = false;
+  int _awardedXp = 0;
+  int _awardedCoins = 0;
+  String? _exportOwnerUid;
+  String? _exportRunId;
 
   /// Why the last run was not counted (too short / too fast), else null.
   String? _notCounted;

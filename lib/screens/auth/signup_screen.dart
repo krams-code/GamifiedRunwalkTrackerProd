@@ -9,10 +9,11 @@ import '../../services/google_auth.dart';
 import '../../utils/password_rules.dart';
 import '../../widgets/block_inputs.dart';
 import '../../widgets/block_ui.dart';
-import '../character/character_creation_screen.dart';
-import '../main_shell.dart';
+import '../../main.dart' show ProfileCompletionGate;
 import '../../models/outfit_catalog.dart';
 import '../../widgets/emoji_icons.dart';
+import '../../services/legal_consent.dart';
+import '../../widgets/legal_consent_controls.dart';
 
 class SignupScreen extends StatefulWidget {
   const SignupScreen({super.key});
@@ -31,6 +32,8 @@ class _SignupScreenState extends State<SignupScreen> {
   bool _obscure = true;
   bool _obscureConfirm = true;
   bool _submitted = false; // show field errors only after the first attempt
+  bool _termsAccepted = false;
+  bool _privacyAcknowledged = false;
   /// The hero type picked on this screen: 'male' | 'female' (null until chosen).
   /// Saved to users/{uid}.gender and used to route the avatar's body sprites.
   String? selectedGender;
@@ -67,24 +70,14 @@ class _SignupScreenState extends State<SignupScreen> {
       _emailError == null &&
       _passError == null &&
       _confirmError == null &&
-      selectedGender != null;
+      selectedGender != null &&
+      LegalConsent.validationError(_termsAccepted, _privacyAcknowledged) == null;
 
   // ── flow ─────────────────────────────────────────────────────────────
   Future<void> _goHome() async {
     if (!mounted) return;
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-    bool characterCreated = false;
-    if (uid != null) {
-      final doc =
-          await FirebaseFirestore.instance.collection('users').doc(uid).get();
-      characterCreated = doc.data()?['character_created'] as bool? ?? false;
-    }
-    if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(
-        builder: (_) =>
-            characterCreated ? const MainShell() : const CharacterCreationScreen(),
-      ),
+      MaterialPageRoute(builder: (_) => const ProfileCompletionGate()),
       (_) => false,
     );
   }
@@ -98,7 +91,8 @@ class _SignupScreenState extends State<SignupScreen> {
     final doc =
         await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
     if (!doc.exists) {
-      await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+      final batch = FirebaseFirestore.instance.batch();
+      batch.set(FirebaseFirestore.instance.collection('users').doc(user.uid), {
         'username': username,
         'username_key': Usernames.key(username),
         'gender': gender,
@@ -111,6 +105,7 @@ class _SignupScreenState extends State<SignupScreen> {
         'total_sessions': 0,
         'created_at': FieldValue.serverTimestamp(),
         'character_created': false,
+        LegalConsent.requiredField: true,
         'skin_tone': '#E0AC69',
         // Starter pack: every new hero starts with ONLY these free items
         // (Wavy Mane, default face, white tank-top set).
@@ -120,18 +115,19 @@ class _SignupScreenState extends State<SignupScreen> {
         'body_tier': 'average',
       });
       // private: only this player can read it
-      await PrivateData.ref(user.uid)
-          .set({'email': user.email}, SetOptions(merge: true))
-          .catchError((Object _) {});
+      batch.set(PrivateData.ref(user.uid), {'email': user.email}, SetOptions(merge: true));
+      batch.set(LegalConsent.ref(user.uid),
+          LegalConsent.record(_termsAccepted, _privacyAcknowledged));
+      await batch.commit();
     }
   }
 
   Future<void> _signupEmail() async {
     setState(() => _submitted = true);
     if (!_valid) {
-      _snack(selectedGender == null
+      _snack(LegalConsent.validationError(_termsAccepted, _privacyAcknowledged) ?? (selectedGender == null
           ? 'Pick your hero type and fix the red fields.'
-          : 'Fix the red fields to continue.');
+          : 'Fix the red fields to continue.'));
       return;
     }
 
@@ -158,14 +154,23 @@ class _SignupScreenState extends State<SignupScreen> {
       }
     } on FirebaseAuthException catch (e) {
       _snack(e.message ?? 'Sign up failed.');
+    } catch (_) {
+      _snack('Could not finish signup. Check your connection and retry.');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
 
   Future<void> _signupGoogle() async {
+    setState(() => _submitted = true);
+    final error = LegalConsent.validationError(_termsAccepted, _privacyAcknowledged);
+    if (error != null) {
+      _snack(error);
+      return;
+    }
     setState(() => _loading = true);
-    final r = await GoogleAuth.signIn();
+    final r = await GoogleAuth.signIn(termsAccepted: _termsAccepted,
+        privacyAcknowledged: _privacyAcknowledged);
     if (!mounted) return;
     setState(() => _loading = false);
     if (r.ok) {
@@ -296,6 +301,13 @@ class _SignupScreenState extends State<SignupScreen> {
                                 size: 11, stroke: 3, color: Color(0xFFFF8A80)),
                           ),
                         const SizedBox(height: 22),
+                        LegalConsentControls(
+                          terms: _termsAccepted, privacy: _privacyAcknowledged,
+                          submitted: _submitted, enabled: !_loading,
+                          onTermsChanged: (v) => setState(() => _termsAccepted = v),
+                          onPrivacyChanged: (v) => setState(() => _privacyAcknowledged = v),
+                        ),
+                        const SizedBox(height: 16),
                         NeonBlueButton(
                           label: 'CREATE HERO',
                           loading: _loading,

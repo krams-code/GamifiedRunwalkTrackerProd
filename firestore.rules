@@ -124,7 +124,7 @@ service cloud.firestore {
     function duelPrizeOk(uid, path) {
       let c = getAfter(path).data;
       return c.winner == uid
-        && c.status == 'done'
+        && validatedDuel(c)
         && get(path).data.status != 'done'
         // a win by default pays only the share of the distance actually run
         // (the rules language has no min(): written as a comparison)
@@ -416,7 +416,7 @@ service cloud.firestore {
     match /users/{uid} {
       allow read: if signedIn();                 // leaderboard + friend profiles
       allow create: if isMe(uid) && freshAccount();
-      allow update: if isMe(uid)
+      allow update: if isMe(uid) && duelUserGuard(uid)
         && (heroSwitchOk() || creationOk() || everydayOk()
             || isTester() || economyOk(uid));
       allow delete: if isMe(uid);
@@ -456,6 +456,7 @@ service cloud.firestore {
         allow read: if isMe(uid);
         // testers may add history-only practice runs (TESTER TOOLS > streak)
         allow create: if isMe(uid)
+          && duelRunOk(uid, id, request.resource.data)
           && (activityOk(request.resource.data) || isTester());
         allow update: if false;
         allow delete: if isMe(uid);
@@ -519,7 +520,8 @@ service cloud.firestore {
       allow read: if signedIn();
       allow create, update: if isMe(uid)
         && request.resource.data.keys().hasOnly(['presence', 'presence_at'])
-        && request.resource.data.presence in ['online', 'idle', 'offline'];
+        && request.resource.data.presence in ['online', 'idle', 'offline']
+        && stamped(request.resource.data, 'presence_at');
       allow delete: if isMe(uid);
     }
 
@@ -552,84 +554,268 @@ service cloud.firestore {
     }
 
     // ── LIVE friend duels ──
-    // Each player may only ever write THEIR OWN entry in progress / ready /
-    // seen / flags, only name themselves as winner, and can only finish the
-    // race (status "done") once their own progress has reached the distance
-    // (or the opponent forfeited, which sets by_default).
     function otherOf(d) {
       return d.participants[0] == request.auth.uid ? d.participants[1] : d.participants[0];
     }
     function myProg(d) { return d.get('progress', {}).get(request.auth.uid, 0); }
-    // progress only changes during the race, and never faster than 25 km/h
-    function progressOk() {
-      return myProg(request.resource.data) == myProg(resource.data)
-        || ('started_at' in resource.data
-            && myProg(request.resource.data) is number
-            && myProg(request.resource.data) <= (request.time.toMillis()
-                 - resource.data.started_at.toMillis()) / 3600000.0 * 25 + 0.2);
-    }
-    // the other runner left, or has sent nothing for 90 s
-    function opponentGone() {
-      return (resource.data.status == 'forfeit'
-              && resource.data.get('forfeit_by', '') != request.auth.uid)
-        || (resource.data.status == 'active'
-            && request.time > resource.data.get('seen', {}).get(otherOf(resource.data),
-                 resource.data.get('started_at', request.time)) + duration.value(90, 's'));
-    }
-    function statusOk() {
-      let ns = request.resource.data.status;
-      return ns == resource.data.status
-        || (ns == 'forfeit' && resource.data.status == 'active'
-            && request.resource.data.get('forfeit_by', '') == request.auth.uid)
-        || (ns == 'done' && resource.data.status in ['active', 'forfeit']
-            && request.resource.data.get('winner', '') == request.auth.uid
-            && request.resource.data.get('prize', 0) <= resource.data.reward
-            && (request.resource.data.get('by_default', false) == true
-                  ? opponentGone()
-                  : myProg(request.resource.data) >= resource.data.distance_km))
-        || (ns in ['lobby', 'countdown', 'active', 'declined', 'cancelled', 'expired']
-            && resource.data.status in ['pending', 'lobby', 'countdown']);
-    }
-
     function ownKeyOnly(field) {
-      return request.resource.data.get(field, {})
-        .diff(resource.data.get(field, {}))
+      return request.resource.data.get(field, {}).diff(resource.data.get(field, {}))
         .affectedKeys().hasOnly([request.auth.uid]);
     }
-
+    function activityPath(uid) { return /databases/$(database)/documents/player_activity/$(uid); }
+    function challengePath(id) { return /databases/$(database)/documents/challenges/$(id); }
+    function cooldownPath(a, b) { return /databases/$(database)/documents/duel_cooldowns/$(a)/recipients/$(b); }
+    function stamped(d, field) { return d.get(field, null) is timestamp && d[field] == request.time; }
+    function freshPresence(uid) {
+      let p = get(/databases/$(database)/documents/presence/$(uid)).data;
+      return p.presence == 'online' && p.presence_at is timestamp && p.presence_at <= request.time
+        && request.time < p.presence_at + duration.value(150, 's');
+    }
+    function freshPlayers(d) { return freshPresence(d.from) && freshPresence(d.to); }
+    function duelReserved(d, id) {
+      let a = get(activityPath(d.from)).data;
+      let b = get(activityPath(d.to)).data;
+      return a.kind == 'duel' && b.kind == 'duel' && a.challenge_id == id && b.challenge_id == id;
+    }
+    function terminal(d) { return d.status in ['done', 'invalid', 'declined', 'cancelled', 'expired', 'busy', 'unverified']; }
+    function pendingLive(d) {
+      return d.status == 'pending' && request.time < d.created_at + duration.value(60, 's')
+        && (d.get('delivered_at', null) != null || request.time < d.created_at + duration.value(10, 's'));
+    }
+    function roomLive(d) {
+      return d.status == 'lobby' && request.time < d.accepted_at + duration.value(900, 's');
+    }
+    function validationLive(d) {
+      return d.status == 'validating' && request.time < d.validating_at + duration.value(90, 's');
+    }
+    function fastWindow(w) {
+      return w is map && w.seconds is number && w.seconds >= 10
+        && w.fixes is int && w.fixes >= 3 && w.gap is number
+        && w.gap >= 0 && w.gap <= 5
+        && w.speed is number && w.speed > 40;
+    }
+    function jump(j) {
+      return j is map && j.seconds is number && j.seconds >= 1
+        && j.seconds <= 5 && j.meters is number && j.meters > 200
+        && j.meters / j.seconds * 3.6 > 100 && j.at is number;
+    }
+    function invalidEvidence(e) {
+      let w = e.get('windows', []);
+      let j = e.get('jumps', []);
+      return (w is list && w.size() == 3 && fastWindow(w[0]) && fastWindow(w[1]) && fastWindow(w[2]))
+        || (j is list && j.size() == 3 && jump(j[0]) && jump(j[1]) && jump(j[2])
+          && j[0].at < j[1].at && j[1].at < j[2].at
+          && j[2].at - j[0].at <= 30);
+    }
+    function cleanFinal(d, uid) {
+      let f = d.get('finals', {}).get(uid, {});
+      return f.get('invalid', true) == false && f.get('for', null) == d.validating_at && !invalidEvidence(f);
+    }
+    function validatedDuel(d) {
+      return d.get('protocol', 0) == 2 && d.status == 'done'
+        && d.get('validated_at', null) is timestamp && cleanFinal(d, d.from) && cleanFinal(d, d.to);
+    }
+    function duelRunOk(uid, id, a) {
+      let linked = a.get('mode', '') == 'duel' || a.get('duel_id', '') != '' || id.matches('duel_.*');
+      return !linked || (a.get('duel_id', '') is string && a.get('duel_id', '') != ''
+        && id == 'duel_' + a.duel_id && uid in get(challengePath(a.duel_id)).data.participants
+        && validatedDuel(get(challengePath(a.duel_id)).data));
+    }
+    function duelUserGuard(uid) {
+      return (!changed('last_duel_id') || validatedDuel(getAfter(challengePath(nd('last_duel_id', ''))).data))
+        && (!runCommit() || duelRunOk(uid, nd('last_run_id', ''), getAfter(actPath(uid, nd('last_run_id', ''))).data));
+    }
+    function released(uid, id) {
+      let old = get(activityPath(uid)).data;
+      let next = getAfter(activityPath(uid)).data;
+      return old.challenge_id != id || (next.kind == 'available' && next.challenge_id == id);
+    }
+    function releaseBoth(d, id) { return released(d.from, id) && released(d.to, id); }
+    function progressOk(d, next, cutoff) {
+      return ownKeyOnly('progress') && myProg(next) is number && myProg(next) >= myProg(d)
+        && myProg(next) <= (cutoff.toMillis() - d.started_at.toMillis()) / 3600000.0
+             * 25 + 0.2;
+    }
+    function opponentGone(d) {
+      return request.time >= d.get('seen', {}).get(otherOf(d), d.started_at) + duration.value(90, 's');
+    }
+    function slotsStale(d) {
+      return request.time >= get(activityPath(d.from)).data.updated_at + duration.value(150, 's')
+        || request.time >= get(activityPath(d.to)).data.updated_at + duration.value(150, 's');
+    }
+    function expiredDuel(d) {
+      return (d.status == 'pending' && !pendingLive(d)) || (d.status == 'lobby' && !roomLive(d))
+        || (d.status == 'countdown' && request.time >= d.countdown_at + duration.value(150, 's'));
+    }
+    function nextKeys(allowed) { return request.resource.data.diff(resource.data).affectedKeys().hasOnly(allowed); }
+    function pendingChange(d, n, id) {
+      return pendingLive(d) && (
+        (request.auth.uid == d.to && !('delivered_at' in d) && n.status == 'pending'
+          && nextKeys(['delivered_at', 'delivery_session']) && stamped(n, 'delivered_at')
+          && n.delivery_session == get(activityPath(d.to)).data.session_id && duelReserved(d, id) && freshPlayers(d))
+        || (request.auth.uid == d.to && n.status == 'lobby' && nextKeys(['status', 'accepted_at'])
+          && stamped(n, 'accepted_at') && d.get('delivered_at', null) is timestamp
+          && d.delivery_session == get(activityPath(d.to)).data.session_id && duelReserved(d, id) && freshPlayers(d))
+        || (request.auth.uid == d.to && n.status == 'declined' && nextKeys(['status', 'finished_at'])
+          && stamped(n, 'finished_at') && getAfter(cooldownPath(d.from, d.to)).data.challenge_id == id
+          && getAfter(cooldownPath(d.from, d.to)).data.declined_at == request.time && releaseBoth(d, id))
+        || (request.auth.uid == d.to && n.status == 'busy' && nextKeys(['status', 'finished_at'])
+          && stamped(n, 'finished_at') && getAfter(activityPath(d.to)).data.kind == 'solo' && released(d.from, id))
+        || (request.auth.uid == d.from && n.status == 'cancelled' && nextKeys(['status', 'finished_at'])
+          && stamped(n, 'finished_at') && released(d.to, id)
+          && getAfter(activityPath(d.from)).data.kind in ['available', 'solo'])
+      );
+    }
+    function liveChange(d, n, id) {
+      return (roomLive(d) && (
+        (n.status == 'lobby' && nextKeys(['ready', 'seen']) && ownKeyOnly('ready') && ownKeyOnly('seen')
+          && n.ready[request.auth.uid] is bool && n.seen[request.auth.uid] == request.time && duelReserved(d, id) && freshPlayers(d))
+        || (n.status == 'countdown' && nextKeys(['status', 'countdown_at']) && stamped(n, 'countdown_at')
+          && d.ready[d.from] == true && d.ready[d.to] == true && duelReserved(d, id) && freshPlayers(d))))
+        || (d.status == 'countdown' && n.status == 'active' && nextKeys(['status', 'started_at']) && stamped(n, 'started_at')
+          && request.time >= d.countdown_at + duration.value(5, 's')
+          && request.time < d.countdown_at + duration.value(150, 's')
+          && d.ready[d.from] == true && d.ready[d.to] == true && duelReserved(d, id) && freshPlayers(d))
+        || (d.status in ['lobby', 'countdown'] && n.status == 'cancelled' && nextKeys(['status', 'finished_at'])
+          && stamped(n, 'finished_at') && releaseBoth(d, id));
+    }
+    function activeChange(d, n) {
+      return d.status == 'active' && (
+        (n.status == 'active' && nextKeys(['progress', 'seen']) && ownKeyOnly('seen')
+          && n.seen[request.auth.uid] == request.time && progressOk(d, n, request.time))
+        || (n.status == 'validating' && stamped(n, 'validating_at') && (
+          (nextKeys(['status', 'candidate', 'by_default', 'validating_at', 'progress', 'seen'])
+            && n.candidate == request.auth.uid && n.by_default is bool && ownKeyOnly('seen')
+            && n.seen[request.auth.uid] == request.time && progressOk(d, n, request.time)
+            && (n.by_default == true ? opponentGone(d) : myProg(n) >= d.distance_km))
+          || (nextKeys(['status', 'candidate', 'by_default', 'validating_at', 'forfeit_by'])
+            && n.forfeit_by == request.auth.uid && n.candidate == otherOf(d) && n.by_default == true)
+        ))) ;
+    }
+    function validatingChange(d, n, id) {
+      let uid = request.auth.uid;
+      let f = n.get('finals', {}).get(uid, {});
+      return validationLive(d) && (
+        (n.status == 'validating' && nextKeys(['finals', 'progress']) && ownKeyOnly('finals')
+          && !(uid in d.finals) && f.keys().hasOnly(['invalid', 'windows', 'jumps', 'observed_at', 'for'])
+          && f.get('invalid', true) == false && f.get('for', null) == d.validating_at && !invalidEvidence(f)
+          && progressOk(d, n, d.validating_at))
+        || (n.status == 'done' && nextKeys(['status', 'winner', 'prize', 'finished_at', 'validated_at'])
+          && d.candidate == uid && n.winner == uid && cleanFinal(d, d.from) && cleanFinal(d, d.to)
+          && stamped(n, 'finished_at') && stamped(n, 'validated_at') && n.prize is int && n.prize >= 0
+          && n.prize <= d.reward && (d.by_default == true
+            ? (myProg(d) < 0.2 ? n.prize == 0 : n.prize <= d.reward * (myProg(d) >= d.distance_km ? 1.0 : myProg(d) / d.distance_km))
+            : myProg(d) >= d.distance_km)
+          && (n.prize == 0 || (getAfter(userDoc(uid)).data.last_duel_id == id
+            && getAfter(userDoc(uid)).data.coins == get(userDoc(uid)).data.coins + n.prize)))
+      );
+    }
+    function invalidChange(d, n, id) {
+      return d.status in ['active', 'validating'] && n.status == 'invalid'
+        && !(request.auth.uid in d.finals) && nextKeys(['status', 'invalidated_by', 'invalid_reason', 'invalid_evidence', 'finished_at'])
+        && n.invalidated_by == request.auth.uid && n.invalid_reason == 'unrealistic_movement'
+        && n.invalid_evidence.get('invalid', false) == true && invalidEvidence(n.invalid_evidence)
+        && n.invalid_evidence.observed_at is timestamp && n.invalid_evidence.observed_at >= d.started_at
+        && n.invalid_evidence.observed_at <= (d.status == 'validating' ? d.validating_at : request.time)
+        && stamped(n, 'finished_at') && releaseBoth(d, id);
+    }
+    function closeChange(d, n, id) {
+      return nextKeys(['status', 'finished_at']) && stamped(n, 'finished_at') && releaseBoth(d, id) && (
+        (n.status == 'expired' && expiredDuel(d))
+        || (n.status == 'unverified' && (d.status == 'validating' || (d.status == 'active' && slotsStale(d))))
+      );
+    }
+    function freeSlot(uid) {
+      let s = get(activityPath(uid)).data;
+      return s.kind == 'available' && s.updated_at <= request.time
+        && request.time < s.updated_at + duration.value(150, 's');
+    }
+    function reservedAfter(uid, id) {
+      let a = get(activityPath(uid)).data;
+      let b = getAfter(activityPath(uid)).data;
+      return b.kind == 'duel' && b.challenge_id == id && b.session_id == a.session_id && stamped(b, 'updated_at');
+    }
     match /challenges/{cid} {
       allow read: if signedIn() && request.auth.uid in resource.data.participants;
-      allow create: if signedIn()
-        && request.resource.data.from == request.auth.uid
-        && request.resource.data.status == 'pending'
-        && request.resource.data.participants.size() == 2
-        && request.resource.data.participants[0] == request.auth.uid
-        // duels only between friends
-        && exists(/databases/$(database)/documents/users/$(request.auth.uid)/friends/$(request.resource.data.participants[1]))
-        // prize = the fixed table (1 km 200, 3 km 400, 5 km 600, 10 km 1000)
+      allow create: if signedIn() && request.resource.data.keys().hasOnly(['protocol', 'participants', 'from', 'to',
+          'from_name', 'to_name', 'distance_km', 'reward', 'status', 'ready', 'progress', 'seen', 'finals', 'created_at'])
+        && request.resource.data.protocol == 2 && request.resource.data.from == request.auth.uid
+        && request.resource.data.participants == [request.auth.uid, request.resource.data.to]
+        && request.resource.data.to is string && request.resource.data.to != request.auth.uid
+        && request.resource.data.status == 'pending' && stamped(request.resource.data, 'created_at')
+        && request.resource.data.from_name is string && request.resource.data.to_name is string
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid)/friends/$(request.resource.data.to))
         && request.resource.data.distance_km in [1, 3, 5, 10]
-        && request.resource.data.reward
-             == {'1': 200, '3': 400, '5': 600, '10': 1000}[string(request.resource.data.distance_km)]
-        && request.resource.data.get('progress', {}).values().hasOnly([0, 0.0])
-        && !('winner' in request.resource.data);
-      allow update: if signedIn()
-        && request.auth.uid in resource.data.participants
-        && request.resource.data.participants == resource.data.participants
-        && request.resource.data.distance_km == resource.data.distance_km
-        && request.resource.data.reward == resource.data.reward
-        && ownKeyOnly('progress')
-        && ownKeyOnly('ready')
-        && ownKeyOnly('seen')
-        && ownKeyOnly('flags')
-        && request.resource.data.get('winner', request.auth.uid) == request.auth.uid
-        && (!('winner' in resource.data)
-            || request.resource.data.winner == resource.data.winner)
-        // a winner is only named when the race is finished
-        && (request.resource.data.status == 'done'
-            || !('winner' in request.resource.data)
-            || 'winner' in resource.data)
-        && progressOk()
-        && statusOk();
+        && request.resource.data.reward == {'1': 200, '3': 400, '5': 600, '10': 1000}[string(request.resource.data.distance_km)]
+        && request.resource.data.ready is map && request.resource.data.ready.keys().hasOnly(request.resource.data.participants)
+        && request.resource.data.ready.size() == 2 && request.resource.data.ready[request.auth.uid] == false
+        && request.resource.data.ready[request.resource.data.to] == false
+        && request.resource.data.progress is map && request.resource.data.progress.keys().hasOnly(request.resource.data.participants)
+        && request.resource.data.progress.size() == 2 && request.resource.data.progress[request.auth.uid] == 0
+        && request.resource.data.progress[request.resource.data.to] == 0
+        && request.resource.data.seen == {} && request.resource.data.finals == {}
+        && freshPlayers(request.resource.data) && freeSlot(request.auth.uid) && freeSlot(request.resource.data.to)
+        && reservedAfter(request.auth.uid, cid) && reservedAfter(request.resource.data.to, cid)
+        && (!exists(cooldownPath(request.auth.uid, request.resource.data.to))
+          || request.time >= get(cooldownPath(request.auth.uid, request.resource.data.to)).data.declined_at
+              + duration.value(3600, 's'));
+      allow update: if signedIn() && request.auth.uid in resource.data.participants && (
+        (resource.data.get('protocol', 0) != 2 && resource.data.status in ['pending', 'lobby', 'countdown', 'active', 'forfeit']
+          && request.resource.data.status == 'expired' && nextKeys(['status', 'finished_at']) && stamped(request.resource.data, 'finished_at'))
+        || (resource.data.get('protocol', 0) == 2 && !terminal(resource.data)
+          && (pendingChange(resource.data, request.resource.data, cid) || liveChange(resource.data, request.resource.data, cid)
+            || activeChange(resource.data, request.resource.data) || validatingChange(resource.data, request.resource.data, cid)
+            || invalidChange(resource.data, request.resource.data, cid) || closeChange(resource.data, request.resource.data, cid)))
+      );
+      allow delete: if false;
+    }
+    function slotRelease(d, n, uid) {
+      return d.kind == 'duel' && n.challenge_id == d.challenge_id && slotClosed(d, n, uid);
+    }
+    function slotClosed(d, n, uid) {
+      let c = getAfter(challengePath(d.challenge_id)).data;
+      return (
+        (n.kind == 'available' && terminal(c))
+        || (isMe(uid) && n.kind == 'solo' && c.status in ['busy', 'cancelled'])
+      );
+    }
+    function slotReserve(d, n, uid) {
+      return d.kind == 'available' && n.kind == 'duel' && n.session_id == d.session_id && slotInvited(n, uid);
+    }
+    function slotInvited(n, uid) {
+      let c = getAfter(challengePath(n.challenge_id)).data;
+      return !exists(challengePath(n.challenge_id)) && c.status == 'pending'
+        && c.from == request.auth.uid && uid in c.participants;
+    }
+    match /player_activity/{uid} {
+      allow read: if signedIn();
+      allow create: if isMe(uid) && request.resource.data.keys().hasOnly(['kind', 'session_id', 'challenge_id', 'outcome_seen', 'updated_at'])
+        && request.resource.data.kind == 'available' && request.resource.data.session_id is string
+        && request.resource.data.challenge_id == '' && request.resource.data.outcome_seen == '' && stamped(request.resource.data, 'updated_at');
+      allow update: if signedIn() && request.resource.data.keys().hasOnly(['kind', 'session_id', 'challenge_id', 'outcome_seen', 'updated_at'])
+        && request.resource.data.session_id is string && request.resource.data.kind in ['available', 'solo', 'duel'] && (
+          (isMe(uid) && nextKeys(['outcome_seen']) && request.resource.data.outcome_seen == resource.data.challenge_id
+            && terminal(get(challengePath(resource.data.challenge_id)).data))
+          || (stamped(request.resource.data, 'updated_at') && (
+            (isMe(uid) && nextKeys(['updated_at']))
+            || (isMe(uid) && resource.data.kind == 'available' && request.resource.data.kind in ['available', 'solo']
+              && request.resource.data.challenge_id == resource.data.challenge_id && request.resource.data.outcome_seen == resource.data.outcome_seen)
+            || ((isMe(uid) || nextKeys(['kind', 'updated_at'])) && slotRelease(resource.data, request.resource.data, uid))
+            || slotReserve(resource.data, request.resource.data, uid)
+            || (isMe(uid) && resource.data.kind == 'solo' && request.resource.data.kind == 'available'
+              && request.resource.data.session_id == resource.data.session_id && nextKeys(['kind', 'updated_at']))
+          ))
+        );
+      allow delete: if isMe(uid) && resource.data.kind == 'available';
+    }
+    match /duel_cooldowns/{from}/recipients/{to} {
+      allow get: if signedIn() && request.auth.uid in [from, to];
+      allow create, update: if signedIn() && request.auth.uid == to
+        && request.resource.data.keys().hasOnly(['challenge_id', 'declined_at']) && stamped(request.resource.data, 'declined_at')
+        && get(challengePath(request.resource.data.challenge_id)).data.status == 'pending'
+        && getAfter(challengePath(request.resource.data.challenge_id)).data.status == 'declined'
+        && getAfter(challengePath(request.resource.data.challenge_id)).data.from == from
+        && getAfter(challengePath(request.resource.data.challenge_id)).data.to == to;
       allow delete: if false;
     }
 

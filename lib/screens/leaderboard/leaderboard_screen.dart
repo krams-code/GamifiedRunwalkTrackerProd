@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -31,6 +32,42 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
   /// My position on each board when I'm not in the top 100 (null = not on
   /// that board, e.g. no run this week).
   final Map<int, Future<int?>> _myRank = {};
+  final Map<int, String> _boardPeriods = {};
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _userSub;
+  List<Object?>? _rankingValues;
+
+  @override
+  void initState() {
+    super.initState();
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    _userSub = FirebaseFirestore.instance.collection('users').doc(uid)
+        .snapshots(includeMetadataChanges: true).listen((doc) {
+      if (!mounted || doc.metadata.hasPendingWrites) return;
+      final data = doc.data() ?? {};
+      final values = [doc.id, data['xp'], data['week_key'], data['week_km'],
+        data['month_key'], data['month_km'], data['gender'], data['tester']];
+      if (_rankingValues != null &&
+          List.generate(values.length, (i) => values[i] == _rankingValues![i])
+              .every((same) => same)) {
+        return;
+      }
+      _rankingValues = values;
+      setState(() {
+        _boards.clear();
+        _myRank.clear();
+      });
+    }, onError: (Object e) {
+      // The board query keeps its existing visible error / pull-to-retry flow.
+      debugPrint('Leaderboard profile refresh: $e');
+    });
+  }
+
+  @override
+  void dispose() {
+    _userSub?.cancel();
+    super.dispose();
+  }
 
   Future<int?> _rankOf(int idx, Map<String, dynamic> me) async {
     final users = FirebaseFirestore.instance.collection('users');
@@ -101,9 +138,15 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
 
   Future<QuerySnapshot<Map<String, dynamic>>> _board(int idx,
       {bool refresh = false}) {
+    final now = DateTime.now();
+    final period = idx == 0 ? Weekly.key(now) : idx == 1 ? monthKey(now) : 'all';
+    if (_boardPeriods[idx] != period) {
+      _boards.remove(idx);
+      _myRank.remove(idx);
+      _boardPeriods[idx] = period;
+    }
     if (!refresh && _boards[idx] != null) return _boards[idx]!;
     final users = FirebaseFirestore.instance.collection('users');
-    final now = DateTime.now();
     final Query<Map<String, dynamic>> q = switch (idx) {
       0 => users
           .where('week_key', isEqualTo: Weekly.key(now))

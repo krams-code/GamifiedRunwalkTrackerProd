@@ -10,12 +10,13 @@ import 'package:flutter/services.dart';
 
 import '../../services/friends_service.dart';
 import '../../services/presence.dart';
+import '../../services/duel_coordinator.dart';
+import '../../models/duel_policy.dart';
 import '../../widgets/unlock_sheet.dart' show showInfoSheet;
 import '../../utils/player_stats.dart';
 import '../../widgets/block_ui.dart';
 import '../../widgets/hero_bust.dart';
 import '../../widgets/hero_sprite.dart';
-import 'duel_room_screen.dart';
 import 'chat_screen.dart';
 import '../../widgets/emoji_icons.dart';
 
@@ -440,17 +441,18 @@ class _FriendsScreenState extends State<FriendsScreen> {
                           otherUid: friendUid,
                           otherName: friendName,
                           km: km,
+                          session: DuelCoordinator.I.session,
                         );
                         if (!mounted) return;
                         setState(() => _tab = 2);
                         await _dialog(
                           icon: '⚔️',
                           title: 'DUEL INVITE SENT!',
-                          body: '$friendName must accept. When they do, tap ENTER ROOM on the DUELS tab and wait for them there.',
+                          body: 'Checking delivery to $friendName. If they accept, the waiting room will open automatically.',
                           color: Rb.orange,
                         );
-                      } catch (_) {
-                        _snack('Could not send the challenge.');
+                      } catch (e) {
+                        _snack(FriendsService.duelError(e));
                       }
                     },
                     child: const SizedBox(
@@ -1068,9 +1070,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
 
   // ───────────────────────── challenges ─────────────────────────
 
-  void _enterRoom(String challengeId) => Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => DuelRoomScreen(challengeId: challengeId)),
-      );
+  void _enterRoom(String challengeId) => DuelCoordinator.I.openRoom?.call(challengeId);
 
   Widget _challengesTab() {
     bool st(_Doc d, String s) => d.data()['status'] == s;
@@ -1079,10 +1079,10 @@ class _FriendsScreenState extends State<FriendsScreen> {
     final pendingOut =
         _challenges.where((d) => st(d, 'pending') && d.data()['from'] == _me).toList();
     final live = _challenges
-        .where((d) => st(d, 'lobby') || st(d, 'countdown') || st(d, 'active'))
+        .where((d) => st(d, 'lobby') || st(d, 'countdown') || st(d, 'active') || st(d, 'validating'))
         .toList();
     final done = _challenges
-        .where((d) => st(d, 'done') || st(d, 'forfeit'))
+        .where((d) => st(d, 'done') || st(d, 'invalid') || st(d, 'unverified'))
         .toList()
       ..sort((a, b) {
         final ta = (a.data()['finished_at'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
@@ -1132,7 +1132,10 @@ class _FriendsScreenState extends State<FriendsScreen> {
                     padding: const EdgeInsets.symmetric(vertical: 8),
                     onTap: () async {
                       try {
-                        await FriendsService.acceptChallenge(d.id);
+                        if (!await FriendsService.acknowledgeChallenge(d.id, _me, DuelCoordinator.I.session)) {
+                          throw const DuelUnavailable('This invitation is no longer available.');
+                        }
+                        await FriendsService.acceptChallenge(d.id, _me, DuelCoordinator.I.session);
                         _enterRoom(d.id);
                       } catch (_) {
                         _dialog(
@@ -1208,6 +1211,8 @@ class _FriendsScreenState extends State<FriendsScreen> {
           for (final d in done.take(8))
             card(Rb.slate, Rb.slateEdge, [
               BlockText(
+                st(d, 'invalid') ? DuelPolicy.dismissedMessage :
+                st(d, 'unverified') ? 'Duel could not be verified. No rewards awarded.' :
                 d.data()['winner'] == _me
                     ? '\u{1F3C6} You beat ${other(d)} — +\u{1FA99}${d.data()['prize'] ?? d.data()['reward']}'
                     : d.data()['status'] == 'forfeit'

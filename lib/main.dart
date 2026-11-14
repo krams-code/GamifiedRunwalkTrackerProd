@@ -1,5 +1,6 @@
 import 'services/sound.dart';
 import 'services/presence.dart';
+import 'widgets/duel_invitation_host.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -11,6 +12,9 @@ import 'screens/main_shell.dart';
 import 'state/user_doc.dart';
 import 'screens/startup_screen.dart';
 import 'firebase_options.dart';
+import 'services/private_data.dart';
+import 'services/legal_consent.dart';
+import 'screens/auth/legal_consent_screen.dart';
 
 /// Run with  --dart-define=PERF_OVERLAY=true  to draw the frame graph.
 const bool kPerfOverlay = bool.fromEnvironment('PERF_OVERLAY');
@@ -72,6 +76,7 @@ class HakbangHeroApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'HakbangHero',
+      navigatorKey: duelNavigatorKey,
       debugShowCheckedModeBanner: false,
       showPerformanceOverlay: kPerfOverlay,
       // Browsers only allow sound after a tap: any touch wakes the music.
@@ -81,7 +86,7 @@ class HakbangHeroApp extends StatelessWidget {
           Sound.I.userGesture();
           Presence.I.touch();
         },
-        child: child,
+        child: DuelInvitationHost(child: child ?? const SizedBox.shrink()),
       ),
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -93,7 +98,7 @@ class HakbangHeroApp extends StatelessWidget {
           surface: Color(0xFF0D1A0D),
         ),
       ),
-      navigatorObservers: [_SoundNavObserver()],
+      navigatorObservers: [_SoundNavObserver(), duelNavigationObserver],
       home: const _AuthGate(),
     );
   }
@@ -150,7 +155,7 @@ class _AuthGate extends StatelessWidget {
           return StartupGate(
             key: ValueKey(user.uid),
             uid: user.uid,
-            child: const _CreationGate(),
+            child: const ProfileCompletionGate(),
           );
         }
         return const _SilentLogin();
@@ -158,21 +163,59 @@ class _AuthGate extends StatelessWidget {
     );
   }
 }
-/// Signed in but the hero was never finished (the app was closed in the middle
-/// of Character Creation): go back to Character Creation instead of the app.
-/// Anyone who finished it, or whose profile can't be read yet, gets the app.
-class _CreationGate extends StatelessWidget {
-  const _CreationGate();
+/// Both sign-in methods and app restarts use the same required profile check.
+class ProfileCompletionGate extends StatefulWidget {
+  const ProfileCompletionGate({super.key});
+
+  @override
+  State<ProfileCompletionGate> createState() => _ProfileCompletionGateState();
+}
+
+class _ProfileCompletionGateState extends State<ProfileCompletionGate> {
+  late Future<Map<String, dynamic>> _profile;
+  bool _needsConsent = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _profile = _read();
+  }
+
+  Future<Map<String, dynamic>> _read() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) throw StateError('Please sign in again.');
+    await UserDoc.instance.stream.firstWhere(
+      (doc) => doc.exists,
+    ).timeout(const Duration(seconds: 12));
+    final profile = await PrivateData.readProfile(uid);
+    _needsConsent = LegalConsent.requiredFor(profile) &&
+        !await LegalConsent.hasAccepted(uid);
+    return profile;
+  }
 
   @override
   Widget build(BuildContext context) {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      stream: uid == null ? null : UserDoc.instance.stream,
-      initialData: UserDoc.instance.snapshotFor(uid),
-      builder: (context, snap) {
-        final d = snap.data?.data();
-        if (d != null && d['character_created'] == false) {
+    // Keep this decision stable while onboarding saves its batch. A local
+    // pending-write event must not remove the form before the server answers.
+    return FutureBuilder<Map<String, dynamic>>(
+      future: _profile,
+      builder: (context, profile) {
+        if (profile.connectionState != ConnectionState.done) {
+          return const StartupView(status: 'LOADING YOUR PROFILE...', progress: 0.5);
+        }
+        if (profile.hasError) {
+          return StartupView(
+            status: 'COULD NOT LOAD YOUR PROFILE', progress: 0.5,
+            failed: true, stuck: true,
+            onRetry: () => setState(() => _profile = _read()),
+          );
+        }
+        if (_needsConsent) {
+          return LegalConsentScreen(onAccepted: () {
+            setState(() => _profile = _read());
+          });
+        }
+        if (!PrivateData.profileComplete(profile.data!)) {
           return const CharacterCreationScreen();
         }
         return const MainShell();

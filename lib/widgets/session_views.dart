@@ -17,6 +17,8 @@ import 'session_avatar.dart';
 import 'tutorial_keys.dart';
 import 'emoji_icons.dart';
 import 'lottie_fx.dart';
+import 'run_summary_actions.dart';
+import '../models/run_summary_export.dart';
 
 const _yellow = Color(0xFFFFD21F);
 
@@ -134,11 +136,17 @@ class TrackingView extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
         // On short screens the dashboard scrolls instead of overflowing.
         child: LayoutBuilder(builder: (context, box) {
+        final textScale = MediaQuery.textScalerOf(context).scale(1);
+        final scrolling = box.maxHeight < (gpsStatus != 0 ? 560 : 480) ||
+            textScale > 1.5 || ghost != null;
         final col = Column(
+          mainAxisSize: scrolling ? MainAxisSize.min : MainAxisSize.max,
           children: [
             // Activity type + GPS state. The time lives in the mode strip
             // below (stage clock / free-run timer), so it isn't shown twice.
-            Row(
+            Wrap(
+              spacing: 8, runSpacing: 6, alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 Block(
                   color: tc,
@@ -150,7 +158,6 @@ class TrackingView extends StatelessWidget {
                   child: BlockText('${type.emoji} ${type.label.toUpperCase()}',
                       size: 13, stroke: 3.5),
                 ),
-                const Spacer(),
                 if (gpsStatus != 3) _gpsChip(),
                 // no mode strip (shouldn't happen): keep a timer visible
                 if (mode == null) ...[
@@ -171,8 +178,8 @@ class TrackingView extends StatelessWidget {
 
             // Middle: the running hero on top, the live map below (equal
             // halves). Timer-only runs have no map, so the hero fills it.
-            Expanded(
-              child: _RunStage(
+            _stageSlot(
+              _RunStage(
                 showMap: gpsStatus != 0,
                 routePoints: routePoints,
                 current: current,
@@ -185,20 +192,13 @@ class TrackingView extends StatelessWidget {
                   mapAsset: mode?.mapAsset,
                 ),
               ),
+              scrolling,
             ),
             const SizedBox(height: 14),
 
-            // Dashboard blocks
-            Row(
-              children: [
-                _stat('DISTANCE', distanceKm.toStringAsFixed(2), 'km',
-                    Rb.green, Rb.greenEdge),
-                _stat('AVG PACE', pace, '/km', Rb.blue, Rb.blueEdge),
-                _stat('MAX SPEED', maxSpeedKmh.toStringAsFixed(1), 'km/h',
-                    Rb.orange, Rb.orangeEdge),
-              ],
-            ),
-            const SizedBox(height: 16),
+            // Compact metrics keep the three running values together.
+            _metrics(context),
+            const SizedBox(height: 10),
 
             // Action footer: ONE full-width button (there is no pause).
             // Press and HOLD so a stray tap mid-run can't end the session.
@@ -208,11 +208,7 @@ class TrackingView extends StatelessWidget {
             ),
           ],
         );
-        final minH = gpsStatus != 0 ? 660.0 : 560.0;
-        if (box.maxHeight >= minH) return col;
-        return SingleChildScrollView(
-          child: SizedBox(height: minH, child: col),
-        );
+        return scrolling ? SingleChildScrollView(child: col) : col;
         }),
       ),
     );
@@ -382,36 +378,47 @@ class TrackingView extends StatelessWidget {
     );
   }
 
-  Widget _stat(String label, String value, String unit, Color c, Color e,
-      {bool dark = false}) {
-    final fg = dark ? Colors.black : Colors.white;
-    return Expanded(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 3),
-        child: Block(
-          color: c,
-          edge: e,
-          depth: 6,
-          radius: 14,
-          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
-          child: Column(
-            children: [
-              FittedBox(
-                fit: BoxFit.scaleDown,
-                child: BlockText(label, size: 10, stroke: 3, color: fg),
-              ),
-              const SizedBox(height: 2),
-              FittedBox(
-                fit: BoxFit.scaleDown,
-                child: BlockText(value, size: 28, stroke: 5, color: fg),
-              ),
-              BlockText(unit, size: 10, stroke: 2.5, color: fg),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+  Widget _stageSlot(Widget stage, bool scrolling) => scrolling
+      ? SizedBox(height: gpsStatus != 0 ? 280 : 240, child: stage)
+      : Expanded(child: stage);
+
+  Widget _metrics(BuildContext context) => LayoutBuilder(builder: (context, box) {
+    final scale = MediaQuery.textScalerOf(context).scale(1);
+    final columns = scale > 1.5 || box.maxWidth < 260 ? 1 : 3;
+    final cards = [
+      _stat('DISTANCE', distanceKm.toStringAsFixed(2), 'km', Rb.green, Rb.greenEdge),
+      _stat('AVG PACE', pace, '/km', Rb.blue, Rb.blueEdge),
+      _stat('MAX SPEED', maxSpeedKmh.toStringAsFixed(1), 'km/h', Rb.orange, Rb.orangeEdge),
+    ];
+    if (columns == 1) {
+      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        for (var i = 0; i < cards.length; i++) ...[
+          if (i > 0) const SizedBox(height: 8), cards[i],
+        ],
+      ]);
+    }
+    return IntrinsicHeight(child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      for (var i = 0; i < cards.length; i++) ...[
+        if (i > 0) const SizedBox(width: 8), Expanded(child: cards[i]),
+      ],
+    ]));
+  });
+
+  Widget _stat(String label, String value, String unit, Color color, Color edge) =>
+    ConstrainedBox(constraints: const BoxConstraints(minHeight: 76), child: Block(
+      color: color, edge: edge, depth: 4, radius: 12,
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Text(label, textAlign: TextAlign.center,
+          style: const TextStyle(color: Colors.black, fontSize: 11, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 5),
+        Wrap(spacing: 3, alignment: WrapAlignment.center, crossAxisAlignment: WrapCrossAlignment.center, children: [
+          Text(value, style: const TextStyle(color: Colors.black, fontSize: 24, fontWeight: FontWeight.w900)),
+          Text(unit, style: const TextStyle(color: Colors.black, fontSize: 11, fontWeight: FontWeight.w800)),
+        ]),
+      ]),
+    ));
+
 }
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -571,6 +578,13 @@ class SessionSummarySheet extends StatelessWidget {
 
   /// Why the save failed (shown when [queued]).
   final String? saveError;
+  final bool retainedLocally;
+  final String? saveNotice;
+  final int? awardedXp;
+  final int? awardedCoins;
+  final String? exportOwnerUid;
+  final String? exportRunId;
+  final ValueChanged<RunSummaryExport>? onExportConfirmed;
 
   /// Set when the run did not count (too short / faster than running).
   final String? notCounted;
@@ -612,6 +626,13 @@ class SessionSummarySheet extends StatelessWidget {
     required this.isSaving,
     this.queued = false,
     this.saveError,
+    this.retainedLocally = true,
+    this.saveNotice,
+    this.awardedXp,
+    this.awardedCoins,
+    this.exportOwnerUid,
+    this.exportRunId,
+    this.onExportConfirmed,
     this.notCounted,
     this.intervalStats,
     this.intervalNewBest = false,
@@ -633,10 +654,10 @@ class SessionSummarySheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // Confetti + stars on a cleared stage or a finished Endless run.
-    final celebrate = outcomeGood ||
+    final celebrate = !queued && saveNotice == null && notCounted == null && (outcomeGood ||
         (mode?.isEndless ?? true) ||
         completedQuests.isNotEmpty ||
-        unlockedRank != null;
+        unlockedRank != null);
     return Stack(
       children: [
         _sheet(context),
@@ -660,96 +681,38 @@ class SessionSummarySheet extends StatelessWidget {
   }
 
   Widget _sheet(BuildContext context) {
-    final totalCoins =
-        completedQuests.fold<int>(0, (s, q) => s + q.coinReward);
-    final (tc, te) = _typeColors(session.type);
-
+    final totalCoins = completedQuests.fold<int>(0, (s, q) => s + q.coinReward);
     return SafeArea(
-      child: TweenAnimationBuilder<double>(
-        tween: Tween(begin: 0.0, end: 1.0),
-        duration: const Duration(milliseconds: 650),
-        curve: Curves.easeOutBack,
-        builder: (context, t, child) => Opacity(
-          opacity: t.clamp(0.0, 1.0),
-          child: Transform.scale(scale: 0.88 + 0.12 * t, child: child),
-        ),
-        child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
-        child: Block(
-          color: const Color(0xFF9A9EA3),
-          edge: Colors.black,
-          depth: 8,
-          radius: 22,
-          padding: const EdgeInsets.all(14),
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: BlockText('🏆 SESSION COMPLETE!',
-                      size: 24, stroke: 5, color: _yellow),
-                ),
-                const SizedBox(height: 6),
-                BlockText(_cheer(), size: 12, stroke: 3, align: TextAlign.center),
-                const SizedBox(height: 10),
-
-                // Victory stage — full avatar, hop + celebration
-                Block(
-                  color: const Color(0xFF8FD3FF),
-                  edge: Rb.blueEdge,
-                  depth: 6,
-                  radius: 16,
-                  padding: EdgeInsets.zero,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(13),
-                    child: SizedBox(
-                      width: 140,
-                      height: 140,
-                      child: Stack(
-                        alignment: Alignment.center,
-                        children: [
-                          Positioned(
-                              left: 8,
-                              top: 8,
-                              child: EmojiText('✨', style: TextStyle(fontSize: 20))),
-                          Positioned(
-                              right: 8,
-                              top: 14,
-                              child: EmojiText('🎉', style: TextStyle(fontSize: 20))),
-                          Positioned(
-                            bottom: 6,
-                            child: const SessionAvatar(
-                              height: 118,
-                              stance: AvatarStance.victory,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 10),
-
-                Block(
-                  color: tc,
-                  edge: te,
-                  depth: 4,
-                  radius: 10,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-                  child: BlockText(
-                      '${session.type.emoji} ${session.type.label.toUpperCase()} • ${session.formattedDuration}',
-                      size: 12,
-                      stroke: 3),
-                ),
-                if (mode != null) ...[
+      child: LayoutBuilder(builder: (context, bounds) => Padding(
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: bounds.maxHeight - 10),
+          child: Block(
+            color: const Color(0xFF9A9EA3), edge: Colors.black,
+            depth: 6, radius: 20, padding: const EdgeInsets.all(12),
+            child: _summaryLayout(context, [
+              _bodySlot(context, Column(mainAxisSize: MainAxisSize.min, children: [
+                  Row(children: [
+                    const SizedBox(width: 64, height: 76,
+                      child: SessionAvatar(height: 72, stance: AvatarStance.victory)),
+                    const SizedBox(width: 10),
+                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      const BlockText('SESSION COMPLETE!', size: 20, stroke: 4, color: _yellow),
+                      const SizedBox(height: 4),
+                      Text('${session.type.label.toUpperCase()}  |  ${session.formattedDuration}',
+                        style: const TextStyle(color: Colors.black, fontSize: 13, fontWeight: FontWeight.w900)),
+                      if (mode != null) Text(mode!.name,
+                        style: const TextStyle(color: Colors.black, fontSize: 12, fontWeight: FontWeight.w800)),
+                    ])),
+                  ]),
+                  const SizedBox(height: 6),
+                  Text(_cheer(), textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.black, fontSize: 12, fontWeight: FontWeight.w800)),
+                  const SizedBox(height: 8),
+                if (saveNotice != null) ...[
                   const SizedBox(height: 10),
-                  _modeRow(mode!),
-                ],
-                if (intervalStats != null) ...[
-                  const SizedBox(height: 10),
-                  _intervalRow(intervalStats!),
+                  BlockText(saveNotice!, size: 11, stroke: 3,
+                      align: TextAlign.center),
                 ],
                 if (queued) ...[
                   const SizedBox(height: 10),
@@ -763,12 +726,16 @@ class SessionSummarySheet extends StatelessWidget {
                     child: Column(
                       children: [
                         BlockText(
-                            (saveError ?? '').startsWith('timeout') ||
+                            !retainedLocally
+                                ? 'SAVE FAILED: the run could not be kept on this device.\n'
+                                    'Rewards have not been confirmed. Keep the app open.'
+                                : (saveError ?? '').startsWith('timeout') ||
                                     (saveError ?? '').startsWith('unavailable')
                                 ? '\u{1F4E1} NO CONNECTION: run kept on your phone.\n'
                                     'It sends by itself when you are back online.'
                                 : '\u26A0\uFE0F RUN NOT SAVED YET: kept on your phone.\n'
-                                    'Tap the SYNC bar on the RUN screen to retry.',
+                                    'Tap the SYNC bar on the RUN screen to retry.\n'
+                                    'Rewards below are pending until the save succeeds.',
                             size: 10.5,
                             stroke: 3,
                             align: TextAlign.center),
@@ -803,38 +770,6 @@ class SessionSummarySheet extends StatelessWidget {
                     ),
                   ),
                 ],
-                if (unlockedRank != null) ...[
-                  const SizedBox(height: 10),
-                  _unlockBanner(unlockedRank!),
-                ],
-                if (ghostResult != null) ...[
-                  const SizedBox(height: 10),
-                  _ghostResultRow(ghostResult!),
-                ],
-                for (final g in duelRewards) ...[
-                  const SizedBox(height: 10),
-                  Block(
-                    color: const Color(0xFF7A3B0A),
-                    edge: const Color(0xFF3A1B00),
-                    depth: 4,
-                    radius: 10,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                    child: BlockText('\u2694\uFE0F DUEL WON! +\u{1FA99}$g',
-                        size: 12, stroke: 3, align: TextAlign.center),
-                  ),
-                ],
-                if (RouteMiniMap.hasRoute(session.routePoints)) ...[
-                  const SizedBox(height: 12),
-                  RouteMiniMap(
-                      points: session.routePoints,
-                      height: 170,
-                      showToggle: true),
-                  if (RouteSplitsTable.hasSplits(session.routePoints)) ...[
-                    const SizedBox(height: 8),
-                    RouteSplitsTable(points: session.routePoints),
-                  ],
-                ],
-                const SizedBox(height: 12),
 
                 Row(children: [
                   _cell('DISTANCE',
@@ -850,6 +785,7 @@ class SessionSummarySheet extends StatelessWidget {
                 ]),
                 const SizedBox(height: 12),
 
+
                 // Rewards area — spotlighted by the Phase 2 tutorial (step 4)
                 KeyedSubtree(
                   key: TutorialKeys.rewards,
@@ -857,46 +793,25 @@ class SessionSummarySheet extends StatelessWidget {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                // Rewards — glossy gold inventory banner
                 Block(
-                  color: Rb.gold,
-                  edge: Rb.goldEdge,
-                  depth: 6,
-                  radius: 14,
-                  gloss: true,
-                  padding:
-                      const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  color: Rb.gold, edge: Rb.goldEdge, depth: 4,
+                  radius: 12, gloss: true, padding: const EdgeInsets.all(10),
+                  child: Wrap(spacing: 18, runSpacing: 6,
+                    alignment: WrapAlignment.spaceEvenly, crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      Flexible(
-                        child: FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: BlockText('⭐ +${session.xpEarned} XP',
-                              size: 17, stroke: 4.5),
-                        ),
-                      ),
-                      Flexible(
-                        child: FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const SizedBox(
-                                  width: 34,
-                                  height: 34,
-                                  child: FxLoop(Fx.coinSpin)),
-                              const SizedBox(width: 2),
-                              BlockText('+${session.coinsEarned} COINS',
-                                  size: 17, stroke: 4.5),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
+                      Text('+${awardedXp ?? session.xpEarned} XP',
+                        style: const TextStyle(color: Colors.black, fontSize: 17, fontWeight: FontWeight.w900)),
+                      Row(mainAxisSize: MainAxisSize.min, children: [
+                        const SizedBox(width: 24, height: 24, child: FxLoop(Fx.coinSpin)),
+                        const SizedBox(width: 4),
+                        Flexible(child: Text('+${awardedCoins ?? session.coinsEarned} COINS',
+                          style: const TextStyle(color: Colors.black, fontSize: 17, fontWeight: FontWeight.w900))),
+                      ]),
+                    ]),
                 ),
 
+                  if (challenges.isNotEmpty || completedQuests.isNotEmpty)
+                    _details('CHALLENGES & QUESTS', [
                 if (challenges.isNotEmpty) ...[
                   const SizedBox(height: 12),
                   _challengePanel(),
@@ -951,10 +866,66 @@ class SessionSummarySheet extends StatelessWidget {
                   ),
                 ],
 
+
+                    ]),
                     ],
                   ),
                 ),
 
+
+                  if (mode != null || intervalStats != null)
+                    _details('MODE & INTERVAL RESULTS', [
+                if (mode != null) ...[
+                  const SizedBox(height: 10),
+                  _modeRow(mode!),
+                ],
+                if (intervalStats != null) ...[
+                  const SizedBox(height: 10),
+                  _intervalRow(intervalStats!),
+                ],
+
+                    ]),
+                  if (unlockedRank != null || ghostResult != null || duelRewards.isNotEmpty)
+                    _details('UNLOCKS, GHOST & DUELS', [
+                if (unlockedRank != null) ...[
+                  const SizedBox(height: 10),
+                  _unlockBanner(unlockedRank!),
+                ],
+                if (ghostResult != null) ...[
+                  const SizedBox(height: 10),
+                  _ghostResultRow(ghostResult!),
+                ],
+                for (final g in duelRewards) ...[
+                  const SizedBox(height: 10),
+                  Block(
+                    color: const Color(0xFF7A3B0A),
+                    edge: const Color(0xFF3A1B00),
+                    depth: 4,
+                    radius: 10,
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                    child: BlockText('\u2694\uFE0F DUEL WON! +\u{1FA99}$g',
+                        size: 12, stroke: 3, align: TextAlign.center),
+                  ),
+                ],
+
+                    ]),
+                  if (RouteMiniMap.hasRoute(session.routePoints))
+                    _details('ROUTE & SPLITS', [
+                if (RouteMiniMap.hasRoute(session.routePoints)) ...[
+                  const SizedBox(height: 12),
+                  RouteMiniMap(
+                      points: session.routePoints,
+                      height: 170,
+                      showToggle: true),
+                  if (RouteSplitsTable.hasSplits(session.routePoints)) ...[
+                    const SizedBox(height: 8),
+                    RouteSplitsTable(points: session.routePoints),
+                  ],
+                ],
+                const SizedBox(height: 12),
+
+
+                    ]),
                 if (session.userPick != session.type) ...[
                   const SizedBox(height: 12),
                   Block(
@@ -972,60 +943,52 @@ class SessionSummarySheet extends StatelessWidget {
                   ),
                 ],
 
-                const SizedBox(height: 16),
-                if (unlockedRank != null && onNextRank != null) ...[
-                  PressBlock(
-                    color: unlockedRank!.color,
-                    edge: unlockedRank!.edge,
-                    depth: 8,
-                    radius: 16,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    onTap: isSaving ? null : onNextRank,
-                    child: SizedBox(
-                      width: double.infinity,
-                      child: Center(
-                        child: FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: BlockText(
-                              'NEXT ${unlockedRank!.isTrial ? 'TRIAL' : 'RANK'} \u25B6  ${unlockedRank!.name}',
-                              size: 17,
-                              stroke: 4.5),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                ],
-                PressBlock(
-                  color: Rb.green,
-                  edge: Rb.greenEdge,
-                  depth: 10,
-                  radius: 18,
-                  padding: const EdgeInsets.symmetric(vertical: 18),
-                  onTap: isSaving ? null : onDone,
-                  child: SizedBox(
-                    width: double.infinity,
-                    child: Center(
-                      child: isSaving
-                          ? const SizedBox(
-                              width: 26,
-                              height: 26,
-                              child: CircularProgressIndicator(
-                                  strokeWidth: 4, color: Colors.black),
-                            )
-                          : const BlockText('DONE',
-                              size: 24, stroke: 5, color: Colors.white),
-                    ),
-                  ),
-                ),
+
+                ]),
+              ),
+              const SizedBox(height: 8),
+              RunSummaryActions(ownerUid: exportOwnerUid, runId: exportRunId,
+                  onConfirmed: onExportConfirmed),
+              const SizedBox(height: 8),
+              if (unlockedRank != null && onNextRank != null) ...[
+                _action('NEXT ${unlockedRank!.isTrial ? 'TRIAL' : 'RANK'}: ${unlockedRank!.name}',
+                  unlockedRank!.color, unlockedRank!.edge, isSaving ? null : onNextRank),
+                const SizedBox(height: 6),
               ],
-            ),
+              _action(isSaving ? 'SAVING...' : 'DONE', Rb.green, Rb.greenEdge, isSaving ? null : onDone),
+            ]),
           ),
         ),
-      ),
-      ),
+      )),
     );
   }
+
+  bool _scrollAll(BuildContext context) =>
+      MediaQuery.textScalerOf(context).scale(1) > 1.5 ||
+      MediaQuery.sizeOf(context).height < 500;
+
+  Widget _summaryLayout(BuildContext context, List<Widget> children) {
+    final content = Column(mainAxisSize: MainAxisSize.min, children: children);
+    return _scrollAll(context) ? SingleChildScrollView(child: content) : content;
+  }
+
+  Widget _bodySlot(BuildContext context, Widget child) => _scrollAll(context)
+      ? child : Flexible(child: SingleChildScrollView(child: child));
+
+  Widget _action(String label, Color color, Color edge, VoidCallback? onTap) => PressBlock(
+    color: color, edge: edge, depth: 4, radius: 12,
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14), onTap: onTap,
+    child: SizedBox(width: double.infinity, child: Text(label, textAlign: TextAlign.center,
+      style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w900))),
+  );
+
+  Widget _details(String title, List<Widget> children) => ExpansionTile(
+    tilePadding: const EdgeInsets.symmetric(horizontal: 4),
+    childrenPadding: const EdgeInsets.only(bottom: 8),
+    title: Text(title, style: const TextStyle(color: Colors.black, fontSize: 12, fontWeight: FontWeight.w900)),
+    iconColor: Colors.black, collapsedIconColor: Colors.black,
+    children: children,
+  );
 
   /// Sudden-challenge results + the loot chest drop.
   Widget _challengePanel() {
@@ -1268,12 +1231,11 @@ class SessionSummarySheet extends StatelessWidget {
             radius: 10,
             padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
             child: Column(children: [
-              FittedBox(
-                fit: BoxFit.scaleDown,
-                child: BlockText(value, size: 16, stroke: 4),
-              ),
-              BlockText(label,
-                  size: 9, stroke: 2.5, color: const Color(0xFFB8BDC4)),
+              Text(value, textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w900)),
+              const SizedBox(height: 3),
+              Text(label, textAlign: TextAlign.center,
+                style: const TextStyle(color: Color(0xFFDEE2E8), fontSize: 11, fontWeight: FontWeight.w800)),
             ]),
           ),
         ),

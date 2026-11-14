@@ -17,6 +17,8 @@ import '../../models/tutorial_progress.dart';
 import '../main_shell.dart';
 import '../../widgets/emoji_icons.dart';
 import '../../state/user_doc.dart';
+import '../../services/legal_consent.dart';
+import '../auth/legal_consent_screen.dart';
 
 class CharacterCreationScreen extends StatefulWidget {
   final bool isEditMode; // true when opened from Profile to tweak appearance
@@ -44,6 +46,9 @@ class _CharacterCreationScreenState extends State<CharacterCreationScreen> {
 
   bool _saving = false;
   bool _loadingExisting = true;
+  Object? _loadError;
+  Map<String, dynamic> _existing = {};
+  bool _repairing = false;
 
   /// 'male' | 'female' from sign-up (users/{uid}.gender). Picks the body sheet.
   String? _gender;
@@ -52,11 +57,7 @@ class _CharacterCreationScreenState extends State<CharacterCreationScreen> {
   void initState() {
     super.initState();
     _loadGender();
-    if (widget.isEditMode) {
-      _loadExistingProfile();
-    } else {
-      _loadingExisting = false;
-    }
+    _loadExistingProfile();
   }
 
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _genderSub;
@@ -131,23 +132,36 @@ class _CharacterCreationScreenState extends State<CharacterCreationScreen> {
       return;
     }
     try {
-      final doc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
-      final data = doc.data();
-      if (data != null && mounted) {
-        final profile = CharacterProfile.fromFirestore(data);
+      final data = await PrivateData.readProfile(uid);
+      if (mounted) {
+        final height = data['height_cm'];
+        final weight = data['weight_kg'];
+        final profile = CharacterProfile.fromFirestore({
+          ...data,
+          'height_cm': height is num && height.isFinite ? height : null,
+          'weight_kg': weight is num && weight.isFinite ? weight : null,
+        });
         setState(() {
-          if (profile.heightCm != null) _heightCmCtrl.text = profile.heightCm!.toStringAsFixed(0);
-          if (profile.weightKg != null) _weightCtrl.text = profile.weightKg!.toStringAsFixed(0);
+          _existing = data;
+          _repairing = data['character_created'] == true ||
+              data['hero_id'] != null || data.containsKey('tutorial_done');
+          if (profile.heightCm != null) _heightCmCtrl.text = profile.heightCm.toString();
+          if (profile.weightKg != null) _weightCtrl.text = profile.weightKg.toString();
+          _heroId = data['hero_id'] as String? ?? kDefaultHeroId;
+          _loadError = null;
           _skinTone = profile.skinTone;
           _hairStyle = profile.hairStyle;
           _hairColor = profile.hairColor;
           _loadingExisting = false;
         });
-      } else if (mounted) {
-        setState(() => _loadingExisting = false);
       }
-    } catch (_) {
-      if (mounted) setState(() => _loadingExisting = false);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _loadError = e;
+          _loadingExisting = false;
+        });
+      }
     }
   }
 
@@ -184,22 +198,23 @@ class _CharacterCreationScreenState extends State<CharacterCreationScreen> {
   }
 
   CharacterProfile get _previewProfile => CharacterProfile(
-        heightCm: _heightCm,
-        weightKg: _weightKg,
+        heightCm: _heightCm?.isFinite == true ? _heightCm : null,
+        weightKg: _weightKg?.isFinite == true ? _weightKg : null,
         skinTone: _skinTone,
         hairStyle: _hairStyle,
         hairColor: _hairColor,
       );
 
   Future<void> _saveAndContinue() async {
+    if (_saving || _loadingExisting || _loadError != null) return;
     final heightCm = _heightCm;
     final weightKg = _weightKg;
 
-    if (!widget.isEditMode && (heightCm == null || heightCm < 100 || heightCm > 250)) {
+    if (!widget.isEditMode && (heightCm == null || !heightCm.isFinite || heightCm < 100 || heightCm > 250)) {
       _snack('Enter a height between 100 and 250 cm.');
       return;
     }
-    if (!widget.isEditMode && (weightKg == null || weightKg < 25 || weightKg > 300)) {
+    if (!widget.isEditMode && (weightKg == null || !weightKg.isFinite || weightKg < 25 || weightKg > 300)) {
       _snack('Enter a weight between 25 and 300 kg.');
       return;
     }
@@ -209,7 +224,7 @@ class _CharacterCreationScreenState extends State<CharacterCreationScreen> {
       return;
     }
 
-    if (!widget.isEditMode && _genderLoaded && !_genderSaved && _gender == null) {
+    if (!widget.isEditMode && (!_genderLoaded || _gender == null)) {
       _snack('Pick BOY or GIRL first.');
       return;
     }
@@ -230,7 +245,29 @@ class _CharacterCreationScreenState extends State<CharacterCreationScreen> {
     // answers), so a refused save is always shown to the player.
     final rootCtx = Navigator.of(context, rootNavigator: true).context;
     try {
+      if (!widget.isEditMode && LegalConsent.requiredFor(_existing) &&
+          !await LegalConsent.hasAccepted(uid)) {
+        if (!mounted) return;
+        final accepted = await Navigator.of(context).push<bool>(MaterialPageRoute(
+          builder: (ctx) => LegalConsentScreen(canGoBack: true,
+              onAccepted: () => Navigator.of(ctx).pop(true)),
+        ));
+        if (accepted != true || !mounted) return;
+      }
+      // Leave an incomplete legacy account incomplete if its save fails.
+      // Existing rules allow initial measurements during character creation.
+      if (!widget.isEditMode && _existing['character_created'] == true &&
+          !PrivateData.profileComplete(_existing)) {
+        await FirebaseFirestore.instance.collection('users').doc(uid)
+            .update({'character_created': false});
+      }
       final fields = profile.toFirestore();
+      if (_repairing && !widget.isEditMode) {
+        fields.remove('skin_tone');
+        fields.remove('hair_style');
+        fields.remove('hair_color');
+        fields.remove('face_expression');
+      }
       // height / weight are private: never on the public user doc
       final body = <String, dynamic>{
         'height_cm': fields.remove('height_cm'),
@@ -251,11 +288,14 @@ class _CharacterCreationScreenState extends State<CharacterCreationScreen> {
         if (!widget.isEditMode) ...{
           // creating the hero counts as the first weekly check-in
           'last_checkin_at': FieldValue.serverTimestamp(),
+        },
+        if (!widget.isEditMode && _genderPickedHere && _gender != null)
+          'gender': _gender,
+        if (!widget.isEditMode && !_repairing) ...{
           // brand-new hero -> the free starter pack, nothing else
           ...StarterPack.toFirestore(),
           'hero_id': _heroId,
           'owned_heroes': FieldValue.arrayUnion([_heroId]),
-          if (_genderPickedHere && _gender != null) 'gender': _gender,
           'owned_items': FieldValue.arrayUnion(StarterPack.ownedItems),
           // ...and show the onboarding tutorial once
           'tutorial_done': false,
@@ -311,6 +351,19 @@ class _CharacterCreationScreenState extends State<CharacterCreationScreen> {
       );
     }
 
+    if (_loadError != null) {
+      return Scaffold(
+        backgroundColor: Rb.bg,
+        body: Center(child: NeonBlueButton(
+          label: 'RETRY LOADING PROFILE',
+          onTap: () {
+            setState(() => _loadingExisting = true);
+            _loadExistingProfile();
+          },
+        )),
+      );
+    }
+
     return PopScope(
       canPop: widget.isEditMode, // onboarding can't be skipped; editing can
       child: Scaffold(
@@ -359,7 +412,7 @@ class _CharacterCreationScreenState extends State<CharacterCreationScreen> {
                       ]),
                       const SizedBox(height: 16),
                     ],
-                    if (!widget.isEditMode) ...[
+                    if (!widget.isEditMode && !_repairing) ...[
                       _panel('🎭 CHOOSE YOUR COSTUME', [
                         _label('YOU CAN UNLOCK MORE COSTUMES LATER'),
                         const SizedBox(height: 8),

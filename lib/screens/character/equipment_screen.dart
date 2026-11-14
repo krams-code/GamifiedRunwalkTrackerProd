@@ -10,6 +10,7 @@ import '../../models/hero_items.dart';
 import '../../models/hero_progress.dart';
 import '../../models/hero_roster.dart';
 import '../../state/evolution_state.dart';
+import '../../services/costume_usage.dart';
 import '../../widgets/block_ui.dart';
 import '../../widgets/hero_rig.dart';
 import '../../widgets/scene_backdrop.dart';
@@ -26,6 +27,7 @@ import '../../widgets/unlock_sheet.dart' show showConfirmSheet;
 //  Reads  users/{uid}: hero_id, owned_heroes, owned_items, hero_outfit + the
 //                      numbers the unlock rules use (xp, total_km, stage_records)
 //  Writes users/{uid}: hero_id, hero_outfit.<slot>
+//  Reads/writes users/{uid}/private/wardrobe: costume_usage_order
 // ═════════════════════════════════════════════════════════════════
 
 class EquipmentScreen extends StatefulWidget {
@@ -38,6 +40,9 @@ class EquipmentScreen extends StatefulWidget {
 class _EquipmentScreenState extends State<EquipmentScreen> {
   HeroSlot _slot = HeroSlot.head;
   RigPose _pose = RigPose.idle;
+  bool _switching = false;
+  String? _usageUid;
+  Stream<DocumentSnapshot<Map<String, dynamic>>>? _usageStream;
   DocumentReference<Map<String, dynamic>>? get _ref {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     return uid == null
@@ -83,26 +88,28 @@ class _EquipmentScreenState extends State<EquipmentScreen> {
       art: HeroStill(heroId: kDefaultHeroId, tier: BodyTier.normal),
       confirmLabel: 'YES, SWITCH & WEAR',
       onConfirm: () async {
-        await _switchHero(sprout, quiet: true);
-        await _wear(i, true);
+        if (await _switchHero(sprout, quiet: true)) await _wear(i, true);
       },
     );
   }
 
-  Future<void> _switchHero(HeroDef h, {bool quiet = false}) async {
+  Future<bool> _switchHero(HeroDef h, {bool quiet = false}) async {
     final ref = _ref;
-    if (ref == null) return;
-    // shows at once; the server is not waited for (it undoes a refusal)
-    saveInBackground(
-        ref.set({
-          'hero_id': h.id,
-          'owned_heroes': FieldValue.arrayUnion([h.id]),
-        }, SetOptions(merge: true)),
-        (_) => _snack('Could not save. Try again.'));
-    if (!quiet) {
-      _snack(h.costume
-          ? 'You are now wearing the ${h.name} costume!'
-          : '${h.name} is back as your hero!');
+    if (ref == null || _switching) return false;
+    setState(() => _switching = true);
+    try {
+      final changed = await CostumeUsage.equip(ref, h);
+      if (!quiet && changed) {
+        _snack(h.costume
+            ? 'You are now wearing the ${h.name} costume!'
+            : '${h.name} is back as your hero!');
+      }
+      return true;
+    } catch (_) {
+      _snack('Could not save. Check your connection and try again.');
+      return false;
+    } finally {
+      if (mounted) setState(() => _switching = false);
     }
   }
 
@@ -114,6 +121,10 @@ class _EquipmentScreenState extends State<EquipmentScreen> {
         backgroundColor: Rb.bg,
         body: LoadingRunner(),
       );
+    }
+    if (_usageUid != ref.id) {
+      _usageUid = ref.id;
+      _usageStream = CostumeUsage.ref(ref.id).snapshots();
     }
     return Scaffold(
       backgroundColor: Rb.bg,
@@ -269,14 +280,15 @@ class _EquipmentScreenState extends State<EquipmentScreen> {
         // hero switcher
         const BlockText('YOUR COSTUMES', size: 13, stroke: 3),
         const SizedBox(height: 6),
-        // all owned costumes at once (wraps to more rows, no sideways swipe)
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            for (final h in kHeroes)
-              if (isHeroUnlocked(h, prog)) _heroTile(h, h.id == heroId, tier),
-          ],
+        StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: _usageStream,
+          builder: (context, usage) => OwnedCostumeList(
+            key: ValueKey(_usageUid),
+            available: [for (final h in kHeroes) if (isHeroUnlocked(h, prog)) h],
+            equipped: heroId, tier: tier, switching: _switching,
+            usage: usage.data?.data()?[CostumeUsage.field],
+            onEquip: _switchHero,
+          ),
         ),
         if (hero?.costume ?? false) ...[
           const SizedBox(height: 8),
@@ -374,29 +386,6 @@ class _EquipmentScreenState extends State<EquipmentScreen> {
     );
   }
 
-  Widget _heroTile(HeroDef h, bool active, BodyTier tier) => PressBlock(
-        color: active ? Rb.gold : h.color,
-        edge: active ? Rb.goldEdge : h.edge,
-        depth: 4,
-        radius: 12,
-        padding: const EdgeInsets.all(6),
-        onTap: active ? null : () => _switchHero(h),
-        child: SizedBox(
-          width: 56,
-          child: Column(
-            children: [
-              SizedBox(height: 56, child: HeroStill(heroId: h.id, tier: tier)),
-              const SizedBox(height: 2),
-              Text(h.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      color: Colors.white, fontSize: 10, fontWeight: FontWeight.w900)),
-            ],
-          ),
-        ),
-      );
-
   Widget _itemTile(HeroItem i, double w, bool on, String heroId, BodyTier tier) =>
       SizedBox(
         width: w,
@@ -435,4 +424,73 @@ class _EquipmentScreenState extends State<EquipmentScreen> {
           ),
         ),
       );
+}
+
+/// The existing costume cards, with a local reveal state and persisted ordering.
+class OwnedCostumeList extends StatefulWidget {
+  final List<HeroDef> available;
+  final String equipped;
+  final BodyTier tier;
+  final Object? usage;
+  final bool switching;
+  final Future<bool> Function(HeroDef) onEquip;
+  const OwnedCostumeList({super.key, required this.available, required this.equipped,
+    required this.tier, this.usage, this.switching = false, required this.onEquip});
+
+  @override
+  State<OwnedCostumeList> createState() => _OwnedCostumeListState();
+}
+
+class _OwnedCostumeListState extends State<OwnedCostumeList> with AutomaticKeepAliveClientMixin {
+  bool _expanded = false;
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final ordered = CostumeUsage.ordered(widget.available, widget.equipped, widget.usage);
+    final visible = _expanded ? ordered : ordered.take(3);
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Wrap(spacing: 8, runSpacing: 8, children: [
+        for (final h in visible) _heroTile(h, h.id == widget.equipped, widget.tier),
+      ]),
+      if (ordered.length > 3) ...[
+        const SizedBox(height: 8),
+        PressBlock(
+          color: Rb.slot, edge: Rb.panelEdge, depth: 3, radius: 10,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          onTap: () => setState(() => _expanded = !_expanded),
+          child: Text(_expanded ? 'Hide other costumes' : 'Show other costumes',
+            style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w900)),
+        ),
+      ],
+    ]);
+  }
+
+  Widget _heroTile(HeroDef h, bool active, BodyTier tier) => PressBlock(
+        key: ValueKey(h.id),
+        color: active ? Rb.gold : h.color,
+        edge: active ? Rb.goldEdge : h.edge,
+        depth: 4,
+        radius: 12,
+        padding: const EdgeInsets.all(6),
+        onTap: active || widget.switching ? null : () => widget.onEquip(h),
+        child: SizedBox(
+          width: 56,
+          child: Column(
+            children: [
+              SizedBox(height: 56, child: HeroStill(heroId: h.id, tier: tier)),
+              const SizedBox(height: 2),
+              Text(h.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      color: Colors.white, fontSize: 10, fontWeight: FontWeight.w900)),
+            ],
+          ),
+        ),
+      );
+
 }

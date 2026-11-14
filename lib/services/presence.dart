@@ -101,6 +101,7 @@ class Presence with WidgetsBindingObserver {
   void holdActive(bool v) {
     _hold = v;
     if (v) touch();
+    _push();
   }
 
   String _current() {
@@ -152,7 +153,8 @@ class Presence with WidgetsBindingObserver {
     final p = d?['presence'];
     if (p != 'online' && p != 'idle') return PresenceStatus.offline;
     final at = d?['presence_at'];
-    if (at is Timestamp && DateTime.now().difference(at.toDate()) > staleAfter) {
+    if (at is! Timestamp || at.toDate().isAfter(DateTime.now()) ||
+        DateTime.now().difference(at.toDate()) >= staleAfter) {
       return PresenceStatus.offline;
     }
     return p == 'idle' ? PresenceStatus.idle : PresenceStatus.online;

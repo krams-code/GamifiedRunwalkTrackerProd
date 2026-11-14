@@ -12,6 +12,7 @@ import '../../models/hero_items.dart';
 import '../../models/hero_progress.dart';
 import '../../models/hero_roster.dart';
 import '../../services/sound.dart';
+import '../../services/costume_usage.dart';
 import '../../state/evolution_state.dart';
 import '../../utils/activity_snapshot.dart';
 import '../../utils/fast_save.dart';
@@ -463,28 +464,28 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
   }
 
   Future<void> _purchase(String uid) async {
+    if (_buying) return;
     setState(() => _buying = true);
     final bought = <String>[];
     try {
       final ref = FirebaseFirestore.instance.collection('users').doc(uid);
-      // A normal write (not a transaction) shows the new coin balance on
-      // screen instantly; the server rules still check the price, and undo
-      // it if anything is wrong.
-      {
-        final snap = await localFirst(ref);
-        final fresh = _Data.from(snap.data() ?? <String, dynamic>{});
+      final draftHero = _heroD;
+      final draftOutfit = Map<String, String>.of(_outD);
+      final draftItems = _draftItems();
+      await CostumeUsage.saveLook(ref, (profile) {
+        final fresh = _Data.from(profile);
 
         var coins = 0;
         final newItems = <String>[];
         bought.clear();
-        for (final i in _draftItems()) {
+        for (final i in draftItems) {
           if (_ownedItem(i, fresh)) continue;
           if (_ruleLockedItem(i, fresh)) throw 'locked';
           coins += _price(i);
           newItems.add(i.id);
           bought.add('${i.emoji} ${i.name}');
         }
-        final h = heroById(_heroD);
+        final h = heroById(draftHero);
         String? newHero;
         if (h != null && !_ownedHero(h, fresh)) {
           if (_ruleLockedHero(h, fresh)) throw 'locked';
@@ -495,25 +496,14 @@ class _AvatarShopScreenState extends State<AvatarShopScreen> {
         if (fresh.p.coins < coins) throw 'coins';
 
         final up = <String, dynamic>{
-          'hero_id': _heroD,
-          'hero_outfit': Map<String, String>.of(_outD),
+          'hero_id': draftHero,
+          'hero_outfit': draftOutfit,
         };
         if (coins > 0) up['coins'] = FieldValue.increment(-coins);
         if (newItems.isNotEmpty) up['owned_items'] = FieldValue.arrayUnion(newItems);
         if (newHero != null) up['owned_heroes'] = FieldValue.arrayUnion([newHero]);
-        // The coins drop and the items appear at once (local write). The
-        // server rules still check the price; a refused purchase is undone
-        // by Firestore and the player is told.
-        saveInBackground(ref.update(up), (e) {
-          if (mounted) {
-            Sound.I.play(Sfx.error);
-            showGameAlert(context,
-                title: 'NOT BOUGHT',
-                message: 'The server refused this purchase, so your coins '
-                    'were given back.\n\n${saveErrorText(e, 'Try again.')}');
-          }
-        });
-      }
+        return up;
+      });
       if (mounted) setState(() => _buying = false);
       if (bought.isEmpty) {
         Sound.I.play(Sfx.buy);

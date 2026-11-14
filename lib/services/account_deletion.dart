@@ -6,6 +6,8 @@ import 'presence.dart';
 import 'private_data.dart';
 import 'run_checkpoint.dart';
 import 'usernames.dart';
+import 'legal_consent.dart';
+import 'costume_usage.dart';
 
 /// Permanently deletes the signed-in player's account (Google Play requires
 /// this inside the app): runs, weight history, private data, friendships,
@@ -79,6 +81,8 @@ abstract final class AccountDeletion {
     await step('pending runs', () => _deleteAll(me.collection('pending_runs')));
     await step('weight', () => _deleteAll(me.collection('weight_checkins')));
     await step('private', () => PrivateData.ref(uid).delete());
+    await step('consent', () => LegalConsent.ref(uid).delete());
+    await step('wardrobe', () => CostumeUsage.ref(uid).delete());
     await step('friends', () async {
       final fr = await me.collection('friends').get();
       for (final f in fr.docs) {

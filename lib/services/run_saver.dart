@@ -13,6 +13,7 @@ import '../models/daily_quest_definitions.dart';
 import '../models/run_mode.dart';
 import '../utils/route_splits.dart';
 import 'friends_service.dart';
+import '../models/duel_policy.dart';
 
 /// Everything needed to save one finished run. Plain JSON, so it can sit in
 /// the outbox on the phone while the player is offline.
@@ -156,6 +157,8 @@ class RunSaveResult {
 
   /// Interval Run: this run beat the player's best FAST pace.
   final bool intervalNewBest;
+  final int awardedXp;
+  final int awardedCoins;
 
   const RunSaveResult({
     this.completedQuests = const [],
@@ -166,6 +169,8 @@ class RunSaveResult {
     this.duplicate = false,
     this.late = false,
     this.intervalNewBest = false,
+    this.awardedXp = 0,
+    this.awardedCoins = 0,
   });
 }
 
@@ -253,63 +258,19 @@ abstract final class RunSaver {
     return {'coins_today': before + addCoins, 'coins_today_day': day};
   }
 
-  /// For runs waiting in a queue. If the server refuses a run as it is (for
-  /// example it was recorded by an older app version with older reward
-  /// maths), try again with the rewards worked out by today's formula, and
-  /// as a last resort keep just the run in the history, without rewards.
-  /// Returns null when even that is refused (impossible data): the run then
-  /// leaves the queue instead of failing forever. Offline errors are thrown.
-  static Future<RunSaveResult?> saveQueued(RunPayload p) async {
-    try {
-      return await save(p).timeout(timeout);
-    } catch (e) {
-      if (!isRejected(e)) rethrow;
-      debugPrint('queued run refused as is: $e');
-    }
-    try {
-      return await save(p.withRecomputedRewards()).timeout(timeout);
-    } catch (e) {
-      if (!isRejected(e)) rethrow;
-      debugPrint('queued run refused with new rewards: $e');
-    }
-    try {
-      await saveRecordOnly(p).timeout(timeout);
-      return const RunSaveResult(late: true);
-    } catch (e) {
-      if (!isRejected(e)) rethrow;
-      debugPrint('queued run refused as a record: $e');
-    }
-    return null;
-  }
-
-  /// Keep the run in the Activity history only (no XP, coins or totals).
-  static Future<void> saveRecordOnly(RunPayload p) async {
-    final ref = FirebaseFirestore.instance
-        .collection('users')
-        .doc(p.uid)
-        .collection('activities')
-        .doc(p.id);
-    final startMs = (p.fields['startTime'] as num).toInt();
-    final endMs = (p.fields['endTime'] as num).toInt();
-    await ref.set({
-      ...p.fields,
-      'startTime': Timestamp.fromMillisecondsSinceEpoch(startMs),
-      'endTime': Timestamp.fromMillisecondsSinceEpoch(endMs),
-      'routePoints': simplifyRoute(_route(p.fields['routePoints'])),
-      'xpEarned': 0,
-      'coinsEarned': 0,
-      'mode': p.modeId,
-      'no_rewards': true,
-    });
-  }
+  /// A rejected write stays queued with its original rewards. A rule or
+  /// connection failure must never turn a valid run into a zero-reward record.
+  static Future<RunSaveResult> saveQueued(RunPayload p,
+      {FirebaseFirestore? firestore}) =>
+      save(p, firestore: firestore).timeout(timeout);
 
   /// Plain-language reason for the sync window.
   static String friendly(String? err) {
     if (err == null || err.isEmpty) return '';
     if (err.startsWith('permission-denied')) {
-      return 'The server refused these runs as they are. Tap SYNC NOW: each '
-          'one is checked again with today\'s reward rules, and if it still '
-          'can\'t be counted it is kept in your history without rewards.';
+      return 'The server refused the save. Your original runs and rewards '
+          'are still waiting. Tap SYNC NOW to retry. If it keeps failing, '
+          'share the reason shown here so the cause can be checked.';
     }
     if (err.startsWith('timeout') ||
         err.startsWith('unavailable') ||
@@ -320,8 +281,9 @@ abstract final class RunSaver {
     return err;
   }
 
-  static Future<RunSaveResult> save(RunPayload p) async {
-    final db = FirebaseFirestore.instance;
+  static Future<RunSaveResult> save(RunPayload p,
+      {FirebaseFirestore? firestore}) async {
+    final db = firestore ?? FirebaseFirestore.instance;
     final userRef = db.collection('users').doc(p.uid);
     final actRef = userRef.collection('activities').doc(p.id);
     final mode = RunMode.byId(p.modeId);
@@ -342,8 +304,26 @@ abstract final class RunSaver {
 
       final existing = await txn.get(actRef);
       if (existing.exists) {
+        if (existing.data()?['no_rewards'] == true) {
+          throw StateError('This run was previously saved without rewards. '
+              'Its original reward payload is retained for review.');
+        }
         result = const RunSaveResult(duplicate: true);
         return;
+      }
+      final duelId = p.fields['duel_id'] as String? ?? (p.id.startsWith('duel_') ? p.id.substring(5) : null);
+      if (p.modeId == 'duel' || duelId != null) {
+        if (duelId == null || duelId.isEmpty) throw const DuelRunDismissed();
+        final duel = (await txn.get(db.collection('challenges').doc(duelId))).data();
+        if (duel == null || duel['protocol'] != DuelPolicy.version ||
+            (DuelPolicy.terminal.contains(duel['status']) && duel['status'] != 'done')) {
+          throw const DuelRunDismissed();
+        }
+        if (duel['status'] != 'done' || duel['validated_at'] is! Timestamp ||
+            !(duel['participants'] as List).contains(p.uid) ||
+            (duel['finals'] as Map?)?[p.uid]?['invalid'] != false) {
+          throw StateError('Duel validation is still pending. No rewards have been added.');
+        }
       }
       final snap = await txn.get(userRef);
       final data = snap.data() ?? <String, dynamic>{};
@@ -360,6 +340,8 @@ abstract final class RunSaver {
           'endTime': Timestamp.fromMillisecondsSinceEpoch(endMs),
           'xpEarned': 0,
           'coinsEarned': 0,
+          'awardedXp': 0,
+          'awardedCoins': 0,
           'mode': p.modeId,
           'late': true,
         });
@@ -442,8 +424,12 @@ abstract final class RunSaver {
         // same shape at a fraction of the size (fast Activity list)
         ..['routePoints'] = simplifyRoute(_route(p.fields['routePoints']));
 
+      final extraCoins = p.bonusCoins + coins;
+      final addCoins = capToday(data, p.coins + extraCoins);
       txn.set(actRef, {
         ...fields,
+        'awardedXp': p.xp,
+        'awardedCoins': addCoins,
         if (p.challenges.isNotEmpty) 'challenges': p.challenges,
         if (p.ghost != null) 'ghost': p.ghost,
         if (iv != null) 'interval': iv,
@@ -452,8 +438,6 @@ abstract final class RunSaver {
         if (p.outcome != null) 'stage_result': p.outcome,
       });
 
-      final extraCoins = p.bonusCoins + coins;
-      final addCoins = capToday(data, p.coins + extraCoins);
       txn.update(userRef, {
         'total_km': FieldValue.increment(km),
         'total_sessions': FieldValue.increment(1),
@@ -487,6 +471,8 @@ abstract final class RunSaver {
         firstClear: first,
         unlockedRank: opened,
         intervalNewBest: newBest,
+        awardedXp: p.xp,
+        awardedCoins: addCoins,
       );
     });
 
@@ -527,11 +513,13 @@ abstract final class RunCloud {
   /// Count every waiting cloud run of [uid]. Returns how many went through.
   static Future<int> flush(String uid) async {
     var sent = 0;
+    RunOutbox.lastError.value = null;
     QuerySnapshot<Map<String, dynamic>> snap;
     try {
       snap = await _col(uid).get().timeout(RunSaver.timeout);
     } catch (e) {
       debugPrint('pending_runs read: $e');
+      RunOutbox.lastError.value = RunSaver.describe(e);
       return 0;
     }
     final docs = [...snap.docs]..sort((a, b) => a.id.compareTo(b.id));
@@ -542,13 +530,11 @@ abstract final class RunCloud {
         if (p.uid != uid) continue;
         final r = await RunSaver.saveQueued(p);
         await done(uid, d.id);
-        if (r == null) {
-          RunOutbox.note('${p.label}: data not possible for a run, removed.');
-        } else {
-          if (r.late) RunOutbox.note('${p.label}: kept in history, no rewards.');
-          sent++;
-        }
-        RunOutbox.lastError.value = null;
+        if (r.late) RunOutbox.note('${p.label}: kept in history, no rewards.');
+        sent++;
+      } on DuelRunDismissed {
+        await done(uid, d.id);
+        RunOutbox.note('Dismissed duel: no rewards or leaderboard progress added.');
       } catch (e) {
         debugPrint('pending_runs save: $e');
         RunOutbox.lastError.value = RunSaver.describe(e);
@@ -594,7 +580,11 @@ abstract final class RunOutbox {
   static void note(String msg) => notes.value = [...notes.value, msg];
 
   static Future<void> refresh() async {
-    _count(await _load());
+    try {
+      _count(await _load());
+    } catch (e) {
+      lastError.value = 'Could not read locally queued runs: $e';
+    }
   }
 
   static Future<List<RunPayload>> _load() async {
@@ -610,28 +600,50 @@ abstract final class RunOutbox {
         }
       }
       return out;
-    } catch (_) {
-      return const [];
+    } catch (e) {
+      lastError.value = 'Could not read locally queued runs: $e';
+      rethrow;
     }
   }
 
   static Future<void> _store(List<RunPayload> list) async {
+    final sp = await SharedPreferences.getInstance();
     try {
-      final sp = await SharedPreferences.getInstance();
-      await sp.setStringList(
+      final stored = await sp.setStringList(
           _key, [for (final p in list) jsonEncode(p.toJson())]);
+      if (!stored) {
+        throw StateError('Could not store the run on this device.');
+      }
       _count(list);
     } catch (e) {
+      // SharedPreferences updates its memory cache even when storage fails.
+      try {
+        await sp.reload();
+      } catch (_) {}
       debugPrint('RunOutbox store failed: $e');
+      rethrow;
     }
   }
 
-  static Future<void> enqueue(RunPayload p) async {
+  static Future<void> _writes = Future<void>.value();
+
+  static Future<void> _mutate(Future<void> Function() action) {
+    final next = _writes.then((_) => action());
+    _writes = next.then<void>((_) {}, onError: (Object e, StackTrace st) {});
+    return next;
+  }
+
+  static Future<void> enqueue(RunPayload p) => _mutate(() async {
     final list = await _load();
-    if (list.any((e) => e.id == p.id)) return;
+    if (list.any((e) => e.uid == p.uid && e.id == p.id)) return;
     list.add(p);
     await _store(list);
-  }
+  });
+
+  static Future<void> remove(String uid, String id) => _mutate(() async {
+    final list = await _load();
+    await _store(list.where((p) => p.uid != uid || p.id != id).toList());
+  });
 
   static Future<int> pendingCount(String uid) async =>
       (await _load()).where((p) => p.uid == uid).length;
@@ -646,37 +658,50 @@ abstract final class RunOutbox {
       // oldest first, so runs reach the server in the order they happened
       int startOf(RunPayload p) => (p.fields['startTime'] as num?)?.toInt() ?? 0;
       list.sort((a, b) => startOf(a).compareTo(startOf(b)));
-      final left = <RunPayload>[];
-      var changed = false;
+      final saved = <String>{};
+      String key(RunPayload p) => '${p.uid}/${p.id}';
+      String? error;
+      lastError.value = null;
       for (final p in list) {
         if (p.uid != uid) {
-          left.add(p);
           continue;
         }
         try {
           final r = await RunSaver.saveQueued(p);
           await RunCloud.done(p.uid, p.id);
-          changed = true;
-          if (r == null) {
-            note('${p.label}: data not possible for a run, removed.');
-          } else {
-            if (r.late) note('${p.label}: kept in history, no rewards.');
-            sent++;
-          }
-          lastError.value = null;
+          saved.add(key(p));
+          if (r.late) note('${p.label}: kept in history, no rewards.');
+          sent++;
+        } on DuelRunDismissed {
+          saved.add(key(p));
+          await RunCloud.done(p.uid, p.id);
+          note('Dismissed duel: no rewards or leaderboard progress added.');
         } catch (e) {
           debugPrint('RunOutbox send failed: $e');
-          lastError.value = RunSaver.describe(e);
-          left.add(p);
+          error = RunSaver.describe(e);
         }
       }
-      if (changed) await _store(left);
+      if (saved.isNotEmpty) {
+        await _mutate(() async {
+          final current = await _load();
+          await _store(current.where((p) => !saved.contains(key(p))).toList());
+        });
+      }
       // then runs waiting in the cloud (recorded on any device)
       sent += await RunCloud.flush(uid);
+      if (error != null) lastError.value = error;
       _count(await _load());
+    } catch (e) {
+      lastError.value = RunSaver.describe(e);
     } finally {
       _flushing = false;
     }
     return sent;
   }
+}
+
+class DuelRunDismissed implements Exception {
+  const DuelRunDismissed();
+  @override
+  String toString() => 'This duel ended without validation. No rewards were added.';
 }

@@ -4,6 +4,7 @@ import '../widgets/reward_popup.dart';
 import 'package:hakbanghero/services/usernames.dart';
 import 'package:hakbanghero/services/private_data.dart';
 import '../services/presence.dart';
+import '../services/duel_coordinator.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -41,6 +42,7 @@ class _MainShellState extends State<MainShell> {
   @override
   void dispose() {
     _friendWatcher?.dispose();
+    DuelCoordinator.I.stop();
     super.dispose();
   }
   // 0 = SHOP, 1 = GEAR, 2 = RUN, 3 = RANKS, 4 = ACTIVITY, 5 = PROFILE
@@ -69,6 +71,7 @@ class _MainShellState extends State<MainShell> {
     EvolutionState.instance.start();
     final me = FirebaseAuth.instance.currentUser;
     if (me != null) {
+      DuelCoordinator.I.start(me.uid).catchError((_) {});
       Presence.I.start(me.uid); // green / orange / red dot for friends
       _friendWatcher = FriendWatcher(me.uid, (name) {
         if (mounted) {
@@ -115,6 +118,7 @@ class _MainShellState extends State<MainShell> {
 
   void _onTrackingChanged(bool active) {
     if (_isTrackingActive == active) return;
+    if (!active && DuelCoordinator.I.soloBusy) DuelCoordinator.I.endSolo();
     if (!active) Sound.I.music(Bgm.menu); // run is over: back to menu music
     setState(() {
       _isTrackingActive = active;

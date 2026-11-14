@@ -15,9 +15,8 @@ import 'avatar_layer_stack.dart';
 import 'avatar_preview.dart';
 import 'block_ui.dart';
 import 'game_stage.dart' show SceneBackPainter;
-import 'hero_rig.dart' show HeroRig, RigPose, kHeroH;
+import 'hero_rig.dart' show HeroRig, RigPose, kHeroH, rigPeriodForPose;
 import 'hero_sprite.dart' show kDefaultClothes;
-import 'map_backdrop.dart';
 import '../state/user_doc.dart';
 
 // ───────────────────────── state machine ─────────────────────────
@@ -26,10 +25,46 @@ enum RunState { idle, walk, jog, run }
 
 /// Speed -> stance.   0 = IDLE · (0,5] = WALK · (5,10] = JOG · >10 = RUN
 RunState runStateForSpeed(double kmh) {
-  if (kmh <= 0) return RunState.idle;
+  if (!kmh.isFinite || kmh <= 0) return RunState.idle;
   if (kmh <= 5) return RunState.walk;
   if (kmh <= 10) return RunState.jog;
   return RunState.run;
+}
+
+/// Visual-only motion envelope. GPS and reward calculations never use this.
+class RunScenePulse {
+  double _level = 0;
+  double _from = 0;
+  double _target = 0;
+  double _transition = 0;
+  double _phase = 0;
+  double _period = 0.9;
+
+  double get scale => 1 + 0.025 * _level * (0.5 - 0.5 * math.cos(_phase * 2 * math.pi));
+
+  void advance(double seconds, {required double speedKmh,
+      bool paused = false, bool boost = false}) {
+    if (!seconds.isFinite || seconds <= 0 || seconds > 0.25) return;
+    final moving = !paused && speedKmh.isFinite && speedKmh > 0;
+    final target = moving ? (speedKmh / 11).clamp(0.35, 1.0).toDouble() : 0.0;
+    if (target != _target) {
+      _from = _level;
+      _target = target;
+      _transition = 0;
+    }
+    _transition += seconds;
+    final duration = moving ? 0.3 : 0.45;
+    final progress = (_transition / duration).clamp(0.0, 1.0).toDouble();
+    _level = _from + (_target - _from) * Curves.easeInOut.transform(progress);
+    final state = runStateForSpeed(moving && boost ? kBoostSpeedKmh : speedKmh);
+    final period = rigPeriodForPose(RigPose.values[state.index]).inMicroseconds / 1e6;
+    _period += (period - _period) * (1 - math.exp(-seconds * 6));
+    if (_level == 0) {
+      _phase = 0;
+    } else {
+      _phase = (_phase + seconds / _period) % 1;
+    }
+  }
 }
 
 /// Time each sprite frame stays on screen.
@@ -46,10 +81,8 @@ Duration frameIntervalFor(RunState s) {
   }
 }
 
-/// While a sudden challenge is live the runner is forced into the RUN stance,
-/// the sprite loop flips a frame every [kBoostFrameInterval] (about 25 fps,
-/// the fastest the 8-frame loop can go), and the scenery scrolls as if at
-/// least [kBoostSpeedKmh].
+/// While moving in a sudden challenge the runner uses the RUN stance and
+/// the sprite loop flips a frame every [kBoostFrameInterval] (about 25 fps).
 const Duration kBoostFrameInterval = Duration(milliseconds: 40);
 const double kBoostSpeedKmh = 24;
 
@@ -58,8 +91,8 @@ extension on RunState {
   String get folder => name; // idle | walk | jog | run
 }
 
-/// Optional extra scrolling image layer behind the character
-/// (e.g. a far-mountains PNG). `speedFactor` 1.0 = same as the road.
+/// Optional image layer behind the character (e.g. a far-mountains PNG).
+/// The legacy speed factor is retained; the live scene no longer scrolls.
 class ParallaxImageLayer {
   final String asset;
   final double speedFactor;
@@ -68,7 +101,7 @@ class ParallaxImageLayer {
 
 // ───────────────────────── widget ─────────────────────────
 
-/// Loop-scrolling pixel-art running engine for the live tracker viewport.
+/// Anchored pixel-art runner with a subtle movement-driven scene pulse.
 ///
 /// SPRITE FRAMES (all 286x512, transparent PNG, frames 01..08):
 ///   assets/images/character/anim/<state>/body_<tier>/frame_01.png … frame_08.png
@@ -95,7 +128,7 @@ class LiveTrackerAnimation extends StatefulWidget {
   /// Folder that holds <state>/<layer>/frame_XX.png.
   final String animRoot;
 
-  /// Background scroll in px/second for every 1 km/h.
+  /// Legacy scenery setting retained for callers; the scene now pulses.
   final double scrollPxPerKmh;
 
   /// Optional image layers drawn between the painted scenery and the runner.
@@ -104,7 +137,7 @@ class LiveTrackerAnimation extends StatefulWidget {
   /// Pass the user doc map to skip the built-in Firestore stream.
   final Map<String, dynamic>? avatarData;
 
-  /// Sudden-challenge mode: max-velocity sprite loop + fast scenery.
+  /// Sudden-challenge mode: faster sprite loop while movement is detected.
   /// Ignored while [paused].
   final bool boost;
 
@@ -140,18 +173,22 @@ class _LiveTrackerAnimationState extends State<LiveTrackerAnimation>
   RunState _state = RunState.idle;
 
   // scenery
+  // Painted and optional image layers keep a fixed horizontal offset.
   final ValueNotifier<double> _scroll = ValueNotifier(0);
-  double _pxPerSec = 0;
+  final ValueNotifier<double> _zoom = ValueNotifier(1);
+  final RunScenePulse _pulse = RunScenePulse();
 
   // assets
   Set<String> _assets = const {};
   final Map<String, List<String>> _frameCache = {};
   RunState? _precached;
 
-  bool get _boosting => widget.boost && !widget.paused;
+  bool get _boosting => widget.boost && !widget.paused &&
+      widget.currentUserSpeedKmh.isFinite && widget.currentUserSpeedKmh > 0;
 
   /// Speed that drives the stance + scenery (boost lifts it to a sprint).
-  double get _speed => widget.paused
+  double get _speed => widget.paused || !widget.currentUserSpeedKmh.isFinite ||
+      widget.currentUserSpeedKmh <= 0
       ? 0
       : _boosting
           ? math.max(widget.currentUserSpeedKmh, kBoostSpeedKmh)
@@ -177,6 +214,7 @@ class _LiveTrackerAnimationState extends State<LiveTrackerAnimation>
     _ticker.dispose();
     _frame.dispose();
     _scroll.dispose();
+    _zoom.dispose();
     super.dispose();
   }
 
@@ -188,7 +226,7 @@ class _LiveTrackerAnimationState extends State<LiveTrackerAnimation>
     // 1) state machine
     final next = runStateForSpeed(_speed);
     if (next != _state) {
-      _state = next;
+      setState(() => _state = next);
       _acc = Duration.zero; // new stance starts on a fresh frame timer
     }
 
@@ -203,18 +241,11 @@ class _LiveTrackerAnimationState extends State<LiveTrackerAnimation>
     }
     if (advanced) _frame.value = _frameIdx;
 
-    // 3) parallax scroll: px/s = speed(km/h) * scrollPxPerKmh, eased so the
-    //    scenery accelerates / brakes smoothly with the runner.
+    // 3) Smooth, bounded scene zoom. No horizontal scenery movement.
     final secs = dt.inMicroseconds / 1e6;
-    // Non-linear: a stroll crawls, a full run (11+ km/h) makes the world fly.
-    // (Boost mode keeps its own fixed sprint speed.)
-    final curve = _boosting
-        ? 1.0
-        : 1.0 + ((_speed - 5.0) / 10.0).clamp(0.0, 1.2).toDouble();
-    final target = _speed * widget.scrollPxPerKmh * curve;
-    _pxPerSec += (target - _pxPerSec) * math.min(1.0, secs * 6);
-    if (_pxPerSec < 0.5 && target == 0) _pxPerSec = 0;
-    if (_pxPerSec > 0) _scroll.value += _pxPerSec * secs;
+    _pulse.advance(secs, speedKmh: widget.currentUserSpeedKmh,
+        paused: widget.paused, boost: _boosting);
+    _zoom.value = _pulse.scale;
   }
 
   // ── sprite frame lookup ──────────────────────────────────────────────
@@ -299,21 +330,22 @@ class _LiveTrackerAnimationState extends State<LiveTrackerAnimation>
       // map pictures have their floor in the bottom ~17%: stand on it
       final feetY = widget.mapAsset != null ? h * 0.075 : groundH * 0.30;
 
-      return Stack(
+      final artwork = Stack(
         children: [
           // ── background: painted parallax scenery ──
           Positioned.fill(
             child: widget.mapAsset != null
-                ? MapBackdrop(
-                    asset: widget.mapAsset!,
-                    scroll: _scroll,
-                    factor: 0.9,
+                ? Image.asset(
+                    widget.mapAsset!,
+                    fit: BoxFit.cover,
+                    gaplessPlayback: true,
+                    filterQuality: FilterQuality.medium,
                   )
                 : RepaintBoundary(
                     child: CustomPaint(painter: SceneBackPainter(_scroll, groundH)),
                   ),
           ),
-          // ── background: optional image layers (scroll left, loop) ──
+          // ── background: optional image layers (stationary) ──
           for (final l in widget.backgroundImages)
             Positioned.fill(
               child: _ScrollingImage(
@@ -358,6 +390,22 @@ class _LiveTrackerAnimationState extends State<LiveTrackerAnimation>
             ),
           ),
 
+        ],
+      );
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          ValueListenableBuilder<double>(
+            valueListenable: _zoom,
+            child: RepaintBoundary(child: artwork),
+            builder: (_, scale, child) => Transform.scale(
+              key: const ValueKey('run-scene-zoom'),
+              scale: scale,
+              // Scale around the planted feet; the hero stays centered.
+              alignment: Alignment(0, 1 - 2 * feetY / h),
+              child: child,
+            ),
+          ),
           if (widget.paused)
             Positioned.fill(
               child: Container(
@@ -373,7 +421,7 @@ class _LiveTrackerAnimationState extends State<LiveTrackerAnimation>
 
   /// New block hero: animated in Flutter (no sprite frames needed).
   Widget _heroRunner(String heroId, BodyTier tier, Map<String, String> outfit) {
-    final pose = widget.boost
+    final pose = _boosting
         ? RigPose.run
         : RigPose.values[_state.index];
     return FittedBox(

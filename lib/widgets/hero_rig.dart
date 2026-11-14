@@ -75,6 +75,10 @@ const Map<RigPose, _Move> _kMoves = {
   RigPose.run: _Move(0.052, 0.22, 0.85, 0.032, 0.06, 440),
 };
 
+/// The live scene uses the same cadence as the character's existing movement.
+Duration rigPeriodForPose(RigPose pose) =>
+    Duration(milliseconds: _kMoves[pose]!.periodMs);
+
 /// Animated block hero. Free, no Rive file needed: the figure is cut into
 /// head / body / 2 arms / 2 legs PNGs and moved with Flutter transforms.
 ///

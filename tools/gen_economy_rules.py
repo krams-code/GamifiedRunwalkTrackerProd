@@ -130,6 +130,10 @@ out = (tmpl
        .replace('__HERO_STAGE__', hero_stage_map)
        .replace('__HERO_MIN_XP__', dart_map(hero_min_xp))
        .replace('__STAGE_TARGETS__', stage_map))
+# Keep approved duel thresholds in one Dart policy source.
+policy = (LIB / 'models/duel_policy.dart').read_text()
+for name, value in re.findall(r'static const (?:int|double) (\w+) = ([0-9.]+);', policy):
+    out = out.replace('__DUEL_' + name + '__', value)
 assert '__' not in out.replace('__name__', ''), 'unfilled placeholder in template'
 (ROOT / 'firestore.rules').write_text(out)
 print('items:', len(items), '| heroes:', len(heroes), '| stage targets:', len(targets))

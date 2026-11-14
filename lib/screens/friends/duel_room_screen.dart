@@ -7,6 +7,8 @@ import 'package:geolocator/geolocator.dart' hide ActivityType;
 
 import '../../models/activity_model.dart';
 import '../../services/friends_service.dart';
+import '../../services/duel_movement.dart';
+import '../../models/duel_policy.dart';
 import '../../services/run_saver.dart';
 import '../../services/run_checkpoint.dart' show ScreenAwake;
 import '../../services/run_gps.dart';
@@ -37,8 +39,8 @@ class DuelRoomScreen extends StatefulWidget {
 }
 
 class _DuelRoomScreenState extends State<DuelRoomScreen> {
-  static const double _maxSpeedKmh = 28; // faster than this is not a person running
-  static const double _maxAccuracyM = 50;
+  static const double _maxSpeedKmh = DuelPolicy.trackingSpeedKmh; // faster than this is not a person running
+  static const double _maxAccuracyM = DuelPolicy.trackingAccuracyM;
   static const int _offlineWarnSecs = 45;
   static const int _offlineClaimSecs = 90;
 
@@ -65,7 +67,15 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
   double _km = 0;
   int _secs = 0;
   double _topSpeed = 0;
-  int _flags = 0;
+  final _movement = DuelMovement();
+  final List<(DuelFix, DateTime)> _rawFixes = [];
+  final List<(DateTime, double)> _distanceSamples = [];
+  bool _sawCountdown = false;
+  bool _continuing = false;
+  bool _submittedFinal = false;
+  bool _submittingFinal = false;
+  Map<String, dynamic>? _pendingInvalid;
+  Timer? _retry;
   Position? _last;
   DateTime? _raceStart;
   final List<Map<String, double>> _route = [];
@@ -75,16 +85,23 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
   void initState() {
     super.initState();
     _me = FirebaseAuth.instance.currentUser?.uid ?? '';
+    _retry = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (_pendingInvalid != null && ['active', 'validating'].contains(_status)) _sendInvalid();
+      if (_status == 'validating' && !_submittedFinal) _validate();
+    });
     _chSub = FriendsService.challenges
         .doc(widget.challengeId)
         .snapshots()
-        .listen(_onChallenge, onError: (_) {});
+        .listen(_onChallenge, onError: (_) {
+          if (mounted) setState(() => _locError = 'Connection lost. Duel rewards are not confirmed.');
+        });
   }
 
   @override
   void dispose() {
     ScreenAwake.off();
     _chSub?.cancel();
+    _retry?.cancel();
     _countTimer?.cancel();
     _tick?.cancel();
     _posSub?.cancel();
@@ -135,6 +152,9 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
   }
 
   void _onChallenge(DocumentSnapshot<Map<String, dynamic>> snap) {
+    if (!mounted) return;
+    if (FirebaseAuth.instance.currentUser?.uid != _me) { _exit(); return; }
+    if (snap.metadata.hasPendingWrites || snap.metadata.isFromCache) return;
     final d = snap.data();
     if (d == null) {
       _exit();
@@ -142,6 +162,9 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
     }
     setState(() => _ch = d);
     _loadProfiles();
+    if (d['protocol'] != DuelPolicy.version && !DuelPolicy.terminal.contains(d['status'])) {
+      FriendsService.expireChallenge(widget.challengeId).catchError((_) {}); return;
+    }
 
     switch (d['status']) {
       case 'lobby':
@@ -151,13 +174,19 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
       case 'active':
         // joined late / came back: resume from my last synced distance
         // (while my own 5-4-3-2-1 is still running, wait for it: both start together)
-        if (!_racing && !_post && _countTimer == null) _startRace(resume: true);
+        if (!_racing && !_post && _countTimer == null && _pendingInvalid == null) _startRace(resume: !_sawCountdown);
+      case 'validating':
+        _validate();
+        FriendsService.settle(widget.challengeId, _me).catchError((_) {});
       case 'done':
         _onDone(d);
       case 'forfeit':
         if (d['forfeit_by'] != _me) {
           FriendsService.claimWin(widget.challengeId, _me, _km).catchError((_) => false);
         }
+      case 'invalid':
+      case 'unverified':
+      case 'busy':
       case 'cancelled':
       case 'declined':
       case 'expired':
@@ -176,28 +205,23 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
 
   void _beginCountdown() {
     if (_countTimer != null || _racing) return;
-    setState(() => _count = FriendsService.countdownSeconds);
-    _countTimer = Timer.periodic(const Duration(seconds: 1), (t) {
-      if (!mounted) {
-        t.cancel();
-        return;
-      }
-      final next = (_count ?? 1) - 1;
-      setState(() => _count = next);
-      if (next <= 0) {
-        t.cancel();
-        _countTimer = null;
-        FriendsService.goActive(widget.challengeId).catchError((_) {});
-        _startRace();
-        // hide "GO!" after a moment
-        Future.delayed(const Duration(milliseconds: 900), () {
-          if (mounted) setState(() => _count = null);
-        });
+    _sawCountdown = true;
+    final at = _ch?['countdown_at'];
+    if (at is! Timestamp) return;
+    final go = at.toDate().add(const Duration(seconds: DuelPolicy.countdownSeconds));
+    _countTimer = Timer.periodic(const Duration(milliseconds: 200), (t) async {
+      if (!mounted) { t.cancel(); _countTimer = null; return; }
+      if (_status == 'active') { t.cancel(); _countTimer = null; _startRace(); return; }
+      if (_status != 'countdown') { t.cancel(); _countTimer = null; return; }
+      final ms = go.difference(DateTime.now()).inMilliseconds;
+      setState(() => _count = (ms / 1000).ceil().clamp(0, DuelPolicy.countdownSeconds));
+      if (ms <= 0) {
+        t.cancel(); _countTimer = null;
+        await FriendsService.goActive(widget.challengeId).catchError((_) {});
+        if (mounted && _status == 'active' && !_racing) _startRace();
       }
     });
   }
-
-  // ───────────────────────── GPS ─────────────────────────
 
   Future<bool> _ensureLocation() async {
     try {
@@ -245,10 +269,10 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
     if (_racing) return;
     _racing = true;
     _count = null;
-    _km = resume ? _progressOf(_me) : 0;
+    if (!_continuing) _km = resume ? _progressOf(_me) : 0;
     final started = (_ch?['started_at'] as Timestamp?)?.toDate();
     // wall clock from the real start: a locked screen / slow timer loses nothing
-    _raceStart = resume && started != null ? started : DateTime.now();
+    _raceStart = started ?? DateTime.now();
     _secs = DateTime.now().difference(_raceStart!).inSeconds.clamp(0, 86400).toInt();
     _last = null;
     ScreenAwake.on(); // the web (iPhone) stops GPS when the screen locks
@@ -276,6 +300,17 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
   }
 
   void _onPosition(Position pos) {
+    if (!_racing || (_post && !_continuing)) return;
+    if (_status == 'active') {
+      final fix = DuelFix(pos.latitude, pos.longitude, pos.accuracy, pos.timestamp, mocked: pos.isMocked);
+      final received = DateTime.now();
+      _rawFixes.add((fix, received));
+      _movement.add(fix, now: received);
+      if (_movement.invalid) {
+        _pendingInvalid = _movement.evidence;
+        _freezeTracking(); _sendInvalid(); return;
+      }
+    }
     // ── anti-foul filters ──
     if (pos.isMocked) {
       _flag('Fake location detected');
@@ -307,6 +342,7 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
     setState(() {
       _locError = null;
       _km += deltaKm;
+      _distanceSamples.add((pos.timestamp, _km));
       if (speed > _topSpeed) _topSpeed = speed;
       _route.add({
         'lat': pos.latitude,
@@ -320,11 +356,46 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
   }
 
   void _flag(String why) {
-    _flags++;
-    if (mounted) setState(() => _locError = '⚠ $why — that movement does not count.');
-    FriendsService.challenges
-        .doc(widget.challengeId)
-        .update({'flags.$_me': _flags}).catchError((_) {});
+    if (mounted) setState(() => _locError = '$why - that movement does not count.');
+  }
+
+  void _freezeTracking() {
+    _racing = false; _tick?.cancel(); _posSub?.cancel(); _countTimer?.cancel(); _countTimer = null;
+    ScreenAwake.off();
+  }
+
+  bool _sendingInvalid = false;
+  Future<void> _sendInvalid() async {
+    if (_sendingInvalid || _pendingInvalid == null) return;
+    _sendingInvalid = true;
+    try { await FriendsService.invalidate(widget.challengeId, _me, _pendingInvalid!); }
+    catch (_) { if (mounted) setState(() => _locError = 'Movement check pending. Waiting for connection; no rewards confirmed.'); }
+    finally { _sendingInvalid = false; }
+  }
+
+  Future<void> _validate() async {
+    _freezeTracking();
+    if (_submittedFinal || _submittingFinal) return;
+    _submittingFinal = true;
+    try {
+      final cutoff = _ch?['validating_at'];
+      if (cutoff is! Timestamp) return;
+      final end = cutoff.toDate();
+      final detector = DuelMovement();
+      for (final sample in _rawFixes.where((f) => !f.$1.at.isAfter(end))) {
+        detector.add(sample.$1, now: sample.$2);
+      }
+      _pendingInvalid = detector.invalid ? detector.evidence : null;
+      final samples = _distanceSamples.where((s) => !s.$1.isAfter(end));
+      _km = samples.isEmpty ? _progressOf(_me) : samples.last.$2;
+      if (_raceStart != null) _secs = end.difference(_raceStart!).inSeconds.clamp(0, 86400);
+      await FriendsService.submitFinal(widget.challengeId, _me, detector.evidence,
+        verified: _sawCountdown, km: _km);
+      _submittedFinal = true;
+      if (mounted) setState(() {});
+    } catch (_) {
+      if (mounted) setState(() => _locError = 'Final validation pending. Waiting for connection.');
+    } finally { _submittingFinal = false; }
   }
 
   Future<void> _checkFinish() async {
@@ -332,7 +403,8 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
     if (_km >= _target) {
       _finishClaimed = true;
       try {
-        await FriendsService.claimFinish(widget.challengeId, _me, _km);
+        final started = await FriendsService.claimFinish(widget.challengeId, _me, _km);
+        if (!started) _finishClaimed = false;
       } catch (_) {
         _finishClaimed = false;
       }
@@ -344,6 +416,7 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
   void _onDone(Map<String, dynamic> d) {
     if (_resultShown) return;
     _resultShown = true;
+    _freezeTracking();
     _post = true;
     _countTimer?.cancel();
     final won = d['winner'] == _me;
@@ -441,7 +514,8 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
         ),
       );
       if (!mounted) return;
-      if (keep == false) await _finishAndSave();
+      if (keep == false) { await _finishAndSave(); }
+      else if (keep == true) { _continuing = true; _startRace(resume: true); }
       // keep == true: the tracker keeps going; the HUD shows a RACE OVER banner
     });
   }
@@ -449,14 +523,19 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
   void _onClosed(String status) {
     if (_closing) return;
     _closing = true;
-    final msg = status == 'declined'
-        ? '$_otherName declined the duel.'
-        : status == 'cancelled'
-            ? 'The room was closed before the race started.'
-            : 'This duel expired.';
+    _freezeTracking();
+    final msg = switch (status) {
+      'invalid' => DuelPolicy.dismissedMessage,
+      'unverified' => 'This duel could not be verified and ended without rewards.',
+      'busy' => DuelPolicy.busyMessage,
+      'declined' => DuelPolicy.declinedMessage,
+      'cancelled' => 'The room was closed before the race started.',
+      _ => 'This duel expired.',
+    };
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
       await _dialog('\u{1F6AA}', 'ROOM CLOSED', msg);
+      await FriendsService.activity(_me).update({'outcome_seen': widget.challengeId}).timeout(const Duration(seconds: 3)).catchError((_) {});
       _exit();
     });
   }
@@ -470,7 +549,7 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
 
   /// Save what was run (also the loser's "keep running" distance).
   Future<void> _finishAndSave() async {
-    if (_saving) return;
+    if (_saving || _status != 'done' || _ch?['protocol'] != DuelPolicy.version) return;
     ScreenAwake.off();
     setState(() => _saving = true);
     _tick?.cancel();
@@ -546,7 +625,8 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
       await FriendsService.leave(widget.challengeId, _me).catchError((_) {});
     }
     if (!mounted) return;
-    await _dialog('\u{1F3C1}', 'RUN SAVED', summary, color: Rb.neon);
+    await _dialog('\u{1F3C1}', 'RUN STATUS', summary, color: Rb.neon);
+    await FriendsService.activity(_me).update({'outcome_seen': widget.challengeId}).timeout(const Duration(seconds: 3)).catchError((_) {});
     _exit();
   }
 
@@ -609,8 +689,13 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
       ),
     );
     if (ok != true) return;
-    await FriendsService.leave(widget.challengeId, _me).catchError((_) {});
-    _exit();
+    try {
+      await FriendsService.leave(widget.challengeId, _me);
+      if (racing) { await _validate(); return; }
+      _exit();
+    } catch (_) {
+      if (mounted) await _dialog('!', 'NOT CLOSED', 'Could not close the duel. Check your connection and retry.');
+    }
   }
 
   Future<void> _dialog(String icon, String title, String body, {Color color = Rb.gold}) {
@@ -739,6 +824,8 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
         return _lobby();
       case 'countdown':
         return _countdownView();
+      case 'validating':
+        return _center('VALIDATING DUEL...\nRewards are pending until both players are verified.');
       case 'active':
       case 'done':
       case 'forfeit':

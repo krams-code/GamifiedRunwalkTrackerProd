@@ -2,6 +2,7 @@ import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../utils/weekly.dart';
 import 'run_saver.dart';
+import '../models/duel_policy.dart';
 
 /// Outcome of looking a friend code up (step 1 of adding a friend).
 enum LookupStatus { found, notFound, self, already, pending, error }
@@ -240,82 +241,152 @@ class FriendsService {
   static const int lobbyMinutes = 15;
   static const int countdownSeconds = 5;
 
+  static DocumentReference<Map<String, dynamic>> activity(String uid) =>
+      _db.collection('player_activity').doc(uid);
+  static DocumentReference<Map<String, dynamic>> cooldown(String from, String to) =>
+      _db.collection('duel_cooldowns').doc(from).collection('recipients').doc(to);
+
+  static String duelError(Object e) => e is DuelUnavailable ? e.message :
+      'Could not update the duel. Check your connection and try again.';
+
+  static bool _leased(Map<String, dynamic>? slot) {
+    final at = slot?['updated_at'];
+    return at is Timestamp && DateTime.now().difference(at.toDate()).inSeconds < DuelPolicy.presenceSeconds;
+  }
+
+  static Future<List<DocumentSnapshot<Map<String, dynamic>>>> _slots(Transaction txn, Map<String, dynamic> d) async =>
+      [for (final uid in (d['participants'] as List).cast<String>()) await txn.get(activity(uid))];
+
+  static void _release(Transaction txn, String id, List<DocumentSnapshot<Map<String, dynamic>>> slots) {
+    for (final slot in slots) {
+      if (slot.data()?['challenge_id'] == id && slot.data()?['kind'] == 'duel') {
+        txn.update(slot.reference, {'kind': 'available', 'updated_at': FieldValue.serverTimestamp()});
+      }
+    }
+  }
+
+  static Future<void> _availablePlayers(Transaction txn, Map<String, dynamic> d, String id) async {
+    for (final uid in (d['participants'] as List).cast<String>()) {
+      final p = await txn.get(_db.collection('presence').doc(uid));
+      final a = await txn.get(activity(uid));
+      if (!DuelPolicy.fresh(p.data(), DateTime.now()) || !_leased(a.data())) {
+        throw const DuelUnavailable('This player is offline or their availability could not be confirmed.');
+      }
+      if (a.data()?['kind'] != 'duel' || a.data()?['challenge_id'] != id) {
+        throw const DuelUnavailable(DuelPolicy.busyMessage);
+      }
+    }
+  }
+
+  /// Reserve both invitation slots in the same commit as the invitation.
   static Future<DocumentReference<Map<String, dynamic>>> sendChallenge({
-    required String me,
-    required String myName,
-    required String otherUid,
-    required String otherName,
-    required int km,
-  }) {
-    return challenges.add({
-      'participants': [me, otherUid],
-      'from': me,
-      'to': otherUid,
-      'from_name': myName,
-      'to_name': otherName,
-      'distance_km': km,
-      'reward': rewardFor[km] ?? km * 10,
-      'status': 'pending',
-      'ready': {me: false, otherUid: false},
-      'progress': {me: 0.0, otherUid: 0.0},
-      'created_at': FieldValue.serverTimestamp(),
-    });
-  }
-
-  static Future<void> declineChallenge(String id) =>
-      challenges.doc(id).update({'status': 'declined'});
-
-  static Future<void> acceptChallenge(String id) => challenges.doc(id).update({
-        'status': 'lobby',
-        'accepted_at': FieldValue.serverTimestamp(),
-        'lobby_expires': Timestamp.fromDate(
-            DateTime.now().add(const Duration(minutes: lobbyMinutes))),
-      });
-
-  static Future<void> setReady(String id, String me, bool ready) =>
-      challenges.doc(id).update({'ready.$me': ready});
-
-  /// Idempotent: whichever client notices "both ready" flips the room.
-  static Future<void> startCountdownIfReady(String id) async {
+    required String me, required String myName, required String otherUid,
+    required String otherName, required int km, required String session,
+  }) async {
+    if (me == otherUid || !rewardFor.containsKey(km)) throw const DuelUnavailable('Choose an eligible friend and distance.');
+    final ref = challenges.doc();
     await _db.runTransaction((txn) async {
-      final s = await txn.get(challenges.doc(id));
-      final d = s.data();
-      if (d == null || d['status'] != 'lobby') return;
-      final ready = (d['ready'] as Map?) ?? {};
-      final parts = (d['participants'] as List).whereType<String>();
-      if (!parts.every((u) => ready[u] == true)) return;
-      txn.update(s.reference,
-          {'status': 'countdown', 'countdown_at': FieldValue.serverTimestamp()});
-    });
-  }
-
-  /// After the local 3-2-1-GO. Idempotent.
-  static Future<void> goActive(String id) async {
-    await _db.runTransaction((txn) async {
-      final s = await txn.get(challenges.doc(id));
-      if (s.data()?['status'] != 'countdown') return;
-      txn.update(s.reference,
-          {'status': 'active', 'started_at': FieldValue.serverTimestamp()});
-    });
-  }
-
-  /// Live progress (also doubles as a "still here" heartbeat).
-  static Future<void> pushProgress(String id, String me, double km) =>
-      challenges.doc(id).update({
-        'progress.$me': double.parse(km.toStringAsFixed(3)),
-        'seen.$me': FieldValue.serverTimestamp(),
+      final wait = (await txn.get(cooldown(me, otherUid))).data()?['declined_at'];
+      if (wait is Timestamp) {
+        final remaining = wait.toDate().add(const Duration(seconds: DuelPolicy.cooldownSeconds)).difference(DateTime.now());
+        if (remaining > Duration.zero) {
+          throw DuelUnavailable('This player declined your duel invitation. Please try again in ${remaining.inMinutes + 1} minutes.');
+        }
+      }
+      final slots = <DocumentSnapshot<Map<String, dynamic>>>[];
+      for (final uid in [me, otherUid]) {
+        final p = await txn.get(_db.collection('presence').doc(uid));
+        final a = await txn.get(activity(uid));
+        if (!DuelPolicy.fresh(p.data(), DateTime.now()) || !_leased(a.data())) {
+          throw const DuelUnavailable('This player is offline or their availability could not be confirmed.');
+        }
+        if (a.data()?['kind'] != 'available') throw const DuelUnavailable(DuelPolicy.busyMessage);
+        if (uid == me && a.data()?['session_id'] != session) {
+          throw const DuelUnavailable('Another session is using this account.');
+        }
+        slots.add(a);
+      }
+      txn.set(ref, {
+        'protocol': DuelPolicy.version, 'participants': [me, otherUid],
+        'from': me, 'to': otherUid, 'from_name': myName, 'to_name': otherName,
+        'distance_km': km, 'reward': rewardFor[km], 'status': 'pending',
+        'ready': {me: false, otherUid: false}, 'progress': {me: 0.0, otherUid: 0.0},
+        'seen': {}, 'finals': {}, 'created_at': FieldValue.serverTimestamp(),
       });
+      for (final a in slots) {
+        txn.update(a.reference, {'kind': 'duel', 'challenge_id': ref.id, 'updated_at': FieldValue.serverTimestamp()});
+      }
+    });
+    return ref;
+  }
 
-  /// A win by default (opponent left / went silent) pays only the share of
-  /// the race you actually ran, and nothing under [minPrizeKm]. This stops
-  /// "free" prizes from a partner who just closes the app.
+  static Future<bool> acknowledgeChallenge(String id, String me, String session) => _db.runTransaction((txn) async {
+    final ref = challenges.doc(id);
+    final d = (await txn.get(ref)).data();
+    final slot = (await txn.get(activity(me))).data();
+    if (d == null || d['protocol'] != DuelPolicy.version || d['status'] != 'pending' ||
+        d['to'] != me || DuelPolicy.expired(d, DateTime.now()) || slot?['session_id'] != session ||
+        slot?['kind'] != 'duel' || slot?['challenge_id'] != id) { return false; }
+    if (d['delivered_at'] != null) return d['delivery_session'] == session;
+    txn.update(ref, {'delivered_at': FieldValue.serverTimestamp(), 'delivery_session': session});
+    return true;
+  });
+
+  static Future<void> declineChallenge(String id) => _closeChallenge(id, 'declined');
+
+  static Future<void> acceptChallenge(String id, String me, String session) => _db.runTransaction((txn) async {
+    final ref = challenges.doc(id);
+    final d = (await txn.get(ref)).data();
+    if (d == null || d['status'] != 'pending' || d['to'] != me ||
+        d['delivery_session'] != session || d['delivered_at'] == null || DuelPolicy.expired(d, DateTime.now())) {
+      throw const DuelUnavailable('This invitation is no longer available.');
+    }
+    await _availablePlayers(txn, d, id);
+    txn.update(ref, {'status': 'lobby', 'accepted_at': FieldValue.serverTimestamp()});
+  });
+
+  static Future<void> setReady(String id, String me, bool ready) => _db.runTransaction((txn) async {
+    final ref = challenges.doc(id);
+    final d = (await txn.get(ref)).data();
+    if (d == null || d['status'] != 'lobby' || DuelPolicy.expired(d, DateTime.now())) {
+      throw const DuelUnavailable('This room is no longer available.');
+    }
+    await _availablePlayers(txn, d, id);
+    txn.update(ref, {'ready.$me': ready, 'seen.$me': FieldValue.serverTimestamp()});
+  });
+
+  static Future<void> startCountdownIfReady(String id) => _db.runTransaction((txn) async {
+    final ref = challenges.doc(id);
+    final d = (await txn.get(ref)).data();
+    if (d == null || d['status'] != 'lobby' || DuelPolicy.expired(d, DateTime.now())) return;
+    if (!(d['participants'] as List).every((u) => (d['ready'] as Map? ?? {})[u] == true)) return;
+    await _availablePlayers(txn, d, id);
+    txn.update(ref, {'status': 'countdown', 'countdown_at': FieldValue.serverTimestamp()});
+  });
+
+  static Future<void> goActive(String id) => _db.runTransaction((txn) async {
+    final ref = challenges.doc(id);
+    final d = (await txn.get(ref)).data();
+    if (d == null || d['status'] != 'countdown') return;
+    final at = d['countdown_at'];
+    if (at is! Timestamp || DateTime.now().difference(at.toDate()).inSeconds < countdownSeconds) return;
+    await _availablePlayers(txn, d, id);
+    txn.update(ref, {'status': 'active', 'started_at': FieldValue.serverTimestamp()});
+  });
+
+  static Future<void> pushProgress(String id, String me, double km) async {
+    final batch = _db.batch();
+    batch.update(challenges.doc(id), {
+      'progress.$me': double.parse(km.toStringAsFixed(3)), 'seen.$me': FieldValue.serverTimestamp(),
+    });
+    batch.update(activity(me), {'updated_at': FieldValue.serverTimestamp()});
+    await batch.commit();
+  }
+
   static const double minPrizeKm = 0.2;
-
-  /// Duel wins per day that pay coins (more wins still count, for fun).
   static const int duelPrizesPerDay = 3;
 
-  static int prizeFor(Map<String, dynamic> d, double myKm,
-      {required bool finished}) {
+  static int prizeFor(Map<String, dynamic> d, double myKm, {required bool finished}) {
     final reward = (d['reward'] as num?)?.toInt() ?? 0;
     if (finished) return reward;
     final dist = (d['distance_km'] as num?)?.toDouble() ?? 1;
@@ -323,85 +394,116 @@ class FriendsService {
     return (reward * (myKm / dist).clamp(0.0, 1.0)).floor();
   }
 
-  /// Writes the result + pays the prize (within the daily coin cap).
   static Future<void> _payWin(Transaction txn, DocumentSnapshot<Map<String, dynamic>> ch,
       String me, double km, {required bool finished}) async {
     final d = ch.data()!;
-    final u = await txn.get(user(me));
-    final ud = u.data() ?? <String, dynamic>{};
-    // only the first [duelPrizesPerDay] duel wins of a day pay coins, so two
-    // friends can't farm coins with back-to-back 1 km duels
+    final ud = (await txn.get(user(me))).data() ?? <String, dynamic>{};
     final day = RunSaver.coinDay();
     final paidToday = (ud['duel_prize_day'] as num?)?.toInt() == day
-        ? ((ud['duel_prizes_today'] as num?)?.toInt() ?? 0)
-        : 0;
-    final prize = paidToday >= duelPrizesPerDay
-        ? 0
-        : RunSaver.capToday(ud, prizeFor(d, km, finished: finished));
-    txn.update(ch.reference, {
-      'status': 'done',
-      'winner': me,
-      'finished_at': FieldValue.serverTimestamp(),
-      'progress.$me': double.parse(km.toStringAsFixed(3)),
-      'prize': prize,
-      if (!finished) 'by_default': true,
-    });
+        ? ((ud['duel_prizes_today'] as num?)?.toInt() ?? 0) : 0;
+    final prize = paidToday >= duelPrizesPerDay ? 0 : RunSaver.capToday(ud, prizeFor(d, km, finished: finished));
+    txn.update(ch.reference, {'status': 'done', 'winner': me, 'prize': prize,
+      'finished_at': FieldValue.serverTimestamp(), 'validated_at': FieldValue.serverTimestamp()});
     if (prize > 0) {
-      txn.update(user(me), {
-        'coins': FieldValue.increment(prize),
-        ...RunSaver.coinsTodayFields(ud, prize),
-        'duel_prize_day': day,
-        'duel_prizes_today': paidToday + 1,
-        'last_duel_id': ch.id, // rules check the prize against this challenge
-      });
+      txn.update(user(me), {'coins': FieldValue.increment(prize), ...RunSaver.coinsTodayFields(ud, prize),
+        'duel_prize_day': day, 'duel_prizes_today': paidToday + 1, 'last_duel_id': ch.id});
     }
   }
 
-  /// I reached the distance. True only for the FIRST finisher.
-  static Future<bool> claimFinish(String id, String me, double km) async {
-    var won = false;
+  static Future<bool> _beginValidation(String id, String me, double km, {required bool byDefault}) =>
+      _db.runTransaction((txn) async {
+    final ref = challenges.doc(id);
+    final d = (await txn.get(ref)).data();
+    if (d == null || d['status'] != 'active') return false;
+    final target = (d['distance_km'] as num).toDouble();
+    if (!byDefault && km < target) return false;
+    txn.update(ref, {'status': 'validating', 'candidate': me, 'by_default': byDefault,
+      'progress.$me': double.parse(km.toStringAsFixed(3)),
+      'seen.$me': FieldValue.serverTimestamp(), 'validating_at': FieldValue.serverTimestamp()});
+    return true;
+  });
+
+  static Future<bool> claimFinish(String id, String me, double km) => _beginValidation(id, me, km, byDefault: false);
+  static Future<bool> claimWin(String id, String me, double km) => _beginValidation(id, me, km, byDefault: true);
+
+  static Future<void> submitFinal(String id, String me, Map<String, dynamic> evidence, {bool verified = true, double? km}) async {
+    if (DuelPolicy.invalidEvidence(evidence)) { await invalidate(id, me, evidence); return; }
+    if (!verified) { await _closeChallenge(id, 'unverified'); return; }
     await _db.runTransaction((txn) async {
-      final s = await txn.get(challenges.doc(id));
-      final d = s.data();
-      if (d == null || d['status'] != 'active') return;
-      await _payWin(txn, s, me, km, finished: true);
-      won = true;
+      final ref = challenges.doc(id);
+      final d = (await txn.get(ref)).data();
+      if (d == null || d['status'] != 'validating' || (d['finals'] as Map? ?? {}).containsKey(me)) return;
+      txn.update(ref, {'finals.$me': {...evidence, 'invalid': false, 'for': d['validating_at']},
+        if (km != null) 'progress.$me': double.parse(km.toStringAsFixed(3))});
     });
-    return won;
+    await settle(id, me);
   }
 
-  /// Leave the room. Mid-race this is a forfeit; before the race it just cancels.
-  static Future<void> leave(String id, String me) async {
+  static Future<void> settle(String id, String me) => _db.runTransaction((txn) async {
+    final snapshot = await txn.get(challenges.doc(id));
+    final d = snapshot.data();
+    if (d == null || d['status'] != 'validating' || d['candidate'] != me || DuelPolicy.expired(d, DateTime.now())) return;
+    final finals = d['finals'] as Map? ?? {};
+    if (!(d['participants'] as List).every((u) => finals[u] is Map &&
+        finals[u]['invalid'] == false && finals[u]['for'] == d['validating_at'])) { return; }
+    final km = ((d['progress'] as Map)[me] as num).toDouble();
+    await _payWin(txn, snapshot, me, km, finished: d['by_default'] != true);
+    // Keep room occupants busy through their post-run save/continue choice.
+    // The coordinator releases each slot once that player leaves the room.
+  });
+
+  static Future<void> invalidate(String id, String me, Map<String, dynamic> evidence) async {
+    if (!DuelPolicy.invalidEvidence(evidence)) throw const DuelUnavailable('Movement evidence is incomplete.');
     await _db.runTransaction((txn) async {
-      final s = await txn.get(challenges.doc(id));
-      final st = s.data()?['status'];
-      if (st == 'active') {
-        txn.update(s.reference, {'status': 'forfeit', 'forfeit_by': me});
-      } else if (st == 'lobby' || st == 'countdown') {
-        txn.update(s.reference, {'status': 'cancelled', 'cancelled_by': me});
-      }
+      final ref = challenges.doc(id);
+      final d = (await txn.get(ref)).data();
+      if (d == null || !['active', 'validating'].contains(d['status'])) return;
+      final slots = await _slots(txn, d);
+      txn.update(ref, {'status': 'invalid', 'invalidated_by': me, 'invalid_evidence': evidence,
+        'invalid_reason': 'unrealistic_movement', 'finished_at': FieldValue.serverTimestamp()});
+      _release(txn, id, slots);
     });
   }
 
-  /// The opponent forfeited or went silent: take the win. The prize is the
-  /// share of the distance I covered ([km]).
-  static Future<bool> claimWin(String id, String me, double km) async {
-    var won = false;
-    await _db.runTransaction((txn) async {
-      final s = await txn.get(challenges.doc(id));
-      final d = s.data();
-      if (d == null) return;
-      final st = d['status'];
-      if (st != 'forfeit' && st != 'active') return;
-      if (st == 'forfeit' && d['forfeit_by'] == me) return;
-      final dist = (d['distance_km'] as num?)?.toDouble() ?? 0;
-      await _payWin(txn, s, me, km, finished: dist > 0 && km >= dist);
-      won = true;
-    });
-    return won;
-  }
+  static Future<void> _closeChallenge(String id, String status) => _db.runTransaction((txn) async {
+    final ref = challenges.doc(id);
+    final d = (await txn.get(ref)).data();
+    if (d == null || DuelPolicy.terminal.contains(d['status'])) return;
+    final slots = d['protocol'] == DuelPolicy.version ? await _slots(txn, d) : <DocumentSnapshot<Map<String, dynamic>>>[];
+    txn.update(ref, {'status': status, 'finished_at': FieldValue.serverTimestamp()});
+    if (status == 'declined') {
+      txn.set(cooldown(d['from'] as String, d['to'] as String), {'challenge_id': id, 'declined_at': FieldValue.serverTimestamp()});
+    }
+    _release(txn, id, slots);
+  });
 
-  // ───────────────────────── weekly km (for "friends this week") ─────────────────────────
+  static Future<void> expireChallenge(String id) => _db.runTransaction((txn) async {
+    final ref = challenges.doc(id);
+    final d = (await txn.get(ref)).data();
+    if (d == null || DuelPolicy.terminal.contains(d['status'])) return;
+    final slots = d['protocol'] == DuelPolicy.version ? await _slots(txn, d) : <DocumentSnapshot<Map<String, dynamic>>>[];
+    final staleActivity = d['status'] == 'active' && slots.any((s) => !_leased(s.data()));
+    if (d['protocol'] == DuelPolicy.version && !DuelPolicy.expired(d, DateTime.now()) && !staleActivity) return;
+    final status = d['status'] == 'validating' || staleActivity ? 'unverified' : 'expired';
+    txn.update(ref, {'status': status, 'finished_at': FieldValue.serverTimestamp()});
+    _release(txn, id, slots);
+  });
+
+  /// Explicit forfeit still requires both final movement reports before payment.
+  static Future<void> leave(String id, String me) => _db.runTransaction((txn) async {
+    final ref = challenges.doc(id);
+    final d = (await txn.get(ref)).data();
+    if (d == null || DuelPolicy.terminal.contains(d['status'])) return;
+    if (d['status'] == 'active') {
+      final other = (d['participants'] as List).firstWhere((u) => u != me);
+      txn.update(ref, {'status': 'validating', 'candidate': other, 'by_default': true,
+        'forfeit_by': me, 'validating_at': FieldValue.serverTimestamp()});
+    } else if (d['status'] != 'validating') {
+      final slots = await _slots(txn, d);
+      txn.update(ref, {'status': 'cancelled', 'finished_at': FieldValue.serverTimestamp()});
+      _release(txn, id, slots);
+    }
+  });
 
   /// Week / month km for the leaderboards. [at] = when the run happened: a
   /// run that reaches the server late (for example run on Sunday, synced on
@@ -471,4 +573,11 @@ class FriendsService {
       }, SetOptions(merge: true));
     } catch (_) {}
   }
+}
+
+class DuelUnavailable implements Exception {
+  final String message;
+  const DuelUnavailable(this.message);
+  @override
+  String toString() => message;
 }

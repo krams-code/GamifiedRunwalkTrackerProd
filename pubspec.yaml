@@ -24,6 +24,8 @@ dependencies:
 
   # Local Storage
   shared_preferences: ^2.3.5
+  share_plus: 13.3.1
+  file_picker: 13.3.3
 
   # ── GPS / Location (NEW) ──────────────────────────────────────────────────
   wakelock_plus: ^1.2.8         # keep the screen on during a run

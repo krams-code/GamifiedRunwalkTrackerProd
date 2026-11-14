@@ -1,4 +1,3 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:hakbanghero/widgets/google_logo.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -6,8 +5,7 @@ import 'package:flutter/material.dart';
 import '../../services/google_auth.dart';
 import '../../widgets/block_inputs.dart';
 import '../../widgets/block_ui.dart';
-import '../character/character_creation_screen.dart';
-import '../main_shell.dart';
+import '../../main.dart' show ProfileCompletionGate;
 import 'forgot_password_screen.dart';
 import 'signup_screen.dart';
 
@@ -26,19 +24,8 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _goHome() async {
     if (!mounted) return;
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-    bool characterCreated = false;
-    if (uid != null) {
-      final doc =
-          await FirebaseFirestore.instance.collection('users').doc(uid).get();
-      characterCreated = doc.data()?['character_created'] as bool? ?? false;
-    }
-    if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(
-        builder: (_) =>
-            characterCreated ? const MainShell() : const CharacterCreationScreen(),
-      ),
+      MaterialPageRoute(builder: (_) => const ProfileCompletionGate()),
       (_) => false,
     );
   }
