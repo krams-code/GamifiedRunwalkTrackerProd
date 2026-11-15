@@ -91,7 +91,7 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
     });
     _chSub = FriendsService.challenges
         .doc(widget.challengeId)
-        .snapshots()
+        .snapshots(includeMetadataChanges: true)
         .listen(_onChallenge, onError: (_) {
           if (mounted) setState(() => _locError = 'Connection lost. Duel rewards are not confirmed.');
         });
@@ -390,7 +390,7 @@ class _DuelRoomScreenState extends State<DuelRoomScreen> {
       _km = samples.isEmpty ? _progressOf(_me) : samples.last.$2;
       if (_raceStart != null) _secs = end.difference(_raceStart!).inSeconds.clamp(0, 86400);
       await FriendsService.submitFinal(widget.challengeId, _me, detector.evidence,
-        verified: _sawCountdown, km: _km);
+        verified: _sawCountdown && _raceStart != null && detector.covers(_raceStart!, end), km: _km);
       _submittedFinal = true;
       if (mounted) setState(() {});
     } catch (_) {

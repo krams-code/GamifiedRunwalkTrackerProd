@@ -1,7 +1,6 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'dart:async';
 import 'package:hakbanghero/widgets/google_logo.dart';
 import 'package:hakbanghero/services/usernames.dart';
-import 'package:hakbanghero/services/private_data.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
@@ -9,8 +8,6 @@ import '../../services/google_auth.dart';
 import '../../utils/password_rules.dart';
 import '../../widgets/block_inputs.dart';
 import '../../widgets/block_ui.dart';
-import '../../main.dart' show ProfileCompletionGate;
-import '../../models/outfit_catalog.dart';
 import '../../widgets/emoji_icons.dart';
 import '../../services/legal_consent.dart';
 import '../../widgets/legal_consent_controls.dart';
@@ -76,10 +73,7 @@ class _SignupScreenState extends State<SignupScreen> {
   // ── flow ─────────────────────────────────────────────────────────────
   Future<void> _goHome() async {
     if (!mounted) return;
-    Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => const ProfileCompletionGate()),
-      (_) => false,
-    );
+    Navigator.of(context).popUntil((route) => route.isFirst);
   }
 
   void _snack(String msg) {
@@ -87,96 +81,87 @@ class _SignupScreenState extends State<SignupScreen> {
     blockSnack(context, msg);
   }
 
-  Future<void> _createUserDoc(User user, String username, {String? gender}) async {
-    final doc =
-        await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
-    if (!doc.exists) {
-      final batch = FirebaseFirestore.instance.batch();
-      batch.set(FirebaseFirestore.instance.collection('users').doc(user.uid), {
-        'username': username,
-        'username_key': Usernames.key(username),
-        'gender': gender,
-        'level': 1,
-        'xp': 0,
-        'coins': 100,
-        'heroic_souls': 0,
-        'total_km': 0.0,
-        'total_steps': 0,
-        'total_sessions': 0,
-        'created_at': FieldValue.serverTimestamp(),
-        'character_created': false,
-        LegalConsent.requiredField: true,
-        'skin_tone': '#E0AC69',
-        // Starter pack: every new hero starts with ONLY these free items
-        // (Wavy Mane, default face, white tank-top set).
-        ...StarterPack.toFirestore(),
-        'owned_items': StarterPack.ownedItems,
-        'hair_color': '#1A1A1A',
-        'body_tier': 'average',
-      });
-      // private: only this player can read it
-      batch.set(PrivateData.ref(user.uid), {'email': user.email}, SetOptions(merge: true));
-      batch.set(LegalConsent.ref(user.uid),
-          LegalConsent.record(_termsAccepted, _privacyAcknowledged));
-      await batch.commit();
-    }
-  }
+  Future<UserCredential>? _accountRequest;
+  bool _verificationRequested = false;
 
   Future<void> _signupEmail() async {
+    if (_loading) return;
     setState(() => _submitted = true);
     if (!_valid) {
-      _snack(LegalConsent.validationError(_termsAccepted, _privacyAcknowledged) ?? (selectedGender == null
-          ? 'Pick your hero type and fix the red fields.'
-          : 'Fix the red fields to continue.'));
+      _snack(LegalConsent.validationError(_termsAccepted, _privacyAcknowledged) ??
+          'Pick your hero type and fix the red fields.');
       return;
     }
-
     final username = _usernameCtrl.text.trim();
+    final email = _emailCtrl.text.trim(), password = _passCtrl.text;
+    final gender = selectedGender;
+    final terms = _termsAccepted, privacy = _privacyAcknowledged;
     setState(() => _loading = true);
-    if (await Usernames.isTaken(username)) {
-      if (mounted) setState(() => _loading = false);
-      _snack('That username is taken. Try another one.');
-      return;
-    }
+    GoogleAuth.inProgress.value = true;
     try {
-      final cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
-        email: _emailCtrl.text.trim(),
-        password: _passCtrl.text, // never trimmed
-      );
-      if (cred.user != null) {
-        // reserve the name (a number is added in the rare same-second clash)
-        final name = await Usernames.claimFree(cred.user!.uid, username);
-        await cred.user!.updateDisplayName(name);
-        // proves the email is real (reminder banner on Home until opened)
-        cred.user!.sendEmailVerification().catchError((Object _) {});
-        await _createUserDoc(cred.user!, name, gender: selectedGender);
-        _goHome();
+      if (_accountRequest == null && FirebaseAuth.instance.currentUser == null &&
+          await Usernames.isTaken(username)) {
+        _snack('That username is taken. Try another one.');
+        return;
       }
+      var user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        // A UI timeout does not cancel account creation. Retry awaits the same
+        // request, and the root auth listener handles a late success.
+        _accountRequest ??= FirebaseAuth.instance.createUserWithEmailAndPassword(
+          email: email, password: password);
+        user = (await _accountRequest!.timeout(const Duration(seconds: 30))).user;
+      }
+      if (user == null) throw StateError('Sign in to finish your account.');
+      await GoogleAuth.ensureUserDoc(user, username, gender: gender,
+        termsAccepted: terms, privacyAcknowledged: privacy)
+          .timeout(const Duration(seconds: 20));
+      if (!_verificationRequested && !user.emailVerified) {
+        _verificationRequested = true;
+        unawaited(user.sendEmailVerification().catchError((Object _) {}));
+      }
+      _goHome();
     } on FirebaseAuthException catch (e) {
-      _snack(e.message ?? 'Sign up failed.');
+      _accountRequest = null;
+      _snack(e.code == 'email-already-in-use'
+        ? 'This email already has an account. Log in to continue.'
+        : 'Could not confirm signup (${e.code}). Check your connection.');
+    } on TimeoutException {
+      _snack(FirebaseAuth.instance.currentUser != null
+        ? 'Your account is created. Profile setup is pending; retry from the loading screen.'
+        : 'Account creation is still unconfirmed. Check your connection; retry will check the same request.');
     } catch (_) {
-      _snack('Could not finish signup. Check your connection and retry.');
+      _snack(FirebaseAuth.instance.currentUser != null
+        ? 'Your account exists. Reconnect to finish setting up your profile.'
+        : 'Could not confirm signup. Check your connection and retry.');
     } finally {
+      GoogleAuth.inProgress.value = false;
       if (mounted) setState(() => _loading = false);
     }
   }
 
   Future<void> _signupGoogle() async {
+    if (_loading) return;
     setState(() => _submitted = true);
     final error = LegalConsent.validationError(_termsAccepted, _privacyAcknowledged);
-    if (error != null) {
-      _snack(error);
-      return;
-    }
+    if (error != null) { _snack(error); return; }
+    final chosenName = _nameError == null ? _usernameCtrl.text.trim() : null;
+    final gender = selectedGender;
     setState(() => _loading = true);
-    final r = await GoogleAuth.signIn(termsAccepted: _termsAccepted,
-        privacyAcknowledged: _privacyAcknowledged);
-    if (!mounted) return;
-    setState(() => _loading = false);
-    if (r.ok) {
-      _goHome();
-    } else {
-      _snack(r.message ?? 'Google sign-up failed.');
+    GoogleAuth.inProgress.value = true;
+    try {
+      final r = await GoogleAuth.signIn().timeout(const Duration(seconds: 60));
+      if (r.user != null) {
+        await GoogleAuth.ensureUserDoc(r.user!, chosenName ?? r.user!.displayName ?? 'Hero', gender: gender,
+          termsAccepted: _termsAccepted, privacyAcknowledged: _privacyAcknowledged)
+            .timeout(const Duration(seconds: 20));
+        _goHome();
+      } else { _snack(r.message ?? 'Google sign-up was not completed.'); }
+    } catch (_) {
+      _snack('Sign-in is not confirmed yet. Reconnect to continue account setup.');
+    } finally {
+      GoogleAuth.inProgress.value = false;
+      if (mounted) setState(() => _loading = false);
     }
   }
 

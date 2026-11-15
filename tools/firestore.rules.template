@@ -399,6 +399,24 @@ service cloud.firestore {
     function stillCreating(uid) {
       return get(userDoc(uid)).data.get('character_created', true) == false;
     }
+    function consentOk() {
+      return request.resource.data.keys().hasOnly(['terms_version', 'privacy_version', 'accepted_at'])
+        && request.resource.data.terms_version == '1.0' && request.resource.data.privacy_version == '1.0'
+        && request.resource.data.accepted_at == request.time;
+    }
+    // Finished runs never change inventory or profile fields. Keep them out of
+    // the shop/catalog alternatives, which exceed the rule expression budget.
+    function runSaveOk(uid) {
+      return keys().hasOnly(['total_km', 'total_sessions', 'last_run_id', 'last_run_end', 'badge_stats',
+          'xp', 'coins', 'coins_today', 'coins_today_day', 'loot_chests', 'daily_progress_km',
+          'daily_progress_date', 'daily_quests_claimed', 'last_run_at', 'week_key', 'week_km',
+          'month_key', 'month_km', 'stage_records', 'interval_runs', 'interval_best_rounds', 'interval_best_fast_pace_s'])
+        && nd('coins', 0) >= 0 && runOk(uid) && stageOk(uid);
+    }
+    function duelRewardSaveOk(uid) {
+      return keys().hasOnly(['coins', 'coins_today', 'coins_today_day', 'duel_prize_day',
+          'duel_prizes_today', 'last_duel_id']) && delta('coins') > 0 && duelWinOk(uid);
+    }
     // one-time move of an old account's height / weight off the public doc
     function movedFromPublic(uid) {
       return 'weight_kg' in get(userDoc(uid)).data
@@ -417,8 +435,8 @@ service cloud.firestore {
       allow read: if signedIn();                 // leaderboard + friend profiles
       allow create: if isMe(uid) && freshAccount();
       allow update: if isMe(uid) && duelUserGuard(uid)
-        && (heroSwitchOk() || creationOk() || everydayOk()
-            || isTester() || economyOk(uid));
+        && (runCommit() ? runSaveOk(uid) : changed('last_duel_id') ? duelRewardSaveOk(uid)
+          : (heroSwitchOk() || creationOk() || everydayOk() || isTester() || economyOk(uid)));
       allow delete: if isMe(uid);
 
       // email / height / weight: only the player can read or write them.
@@ -427,14 +445,14 @@ service cloud.firestore {
       // one (the app asks every 7 days). First values are always allowed.
       match /private/{doc} {
         allow read, delete: if isMe(uid);
-        allow create: if isMe(uid) && bodyRangesOk()
+        allow create: if isMe(uid) && (doc != 'consent' || consentOk()) && bodyRangesOk()
           && ((request.resource.data.get('weight_kg', null) == null
                 && request.resource.data.get('height_cm', null) == null)
               || !('last_checkin_at' in get(userDoc(uid)).data)
               || stillCreating(uid)
               || movedFromPublic(uid)
               || checkInNow(uid));
-        allow update: if isMe(uid) && bodyRangesOk()
+        allow update: if isMe(uid) && (doc != 'consent' || consentOk()) && bodyRangesOk()
           && (!privBodyChanged()
               || resource.data.get('weight_kg', null) == null
               || stillCreating(uid)
@@ -599,17 +617,37 @@ service cloud.firestore {
         && j.seconds <= __DUEL_jumpMaxSeconds__ && j.meters is number && j.meters > __DUEL_jumpMeters__
         && j.meters / j.seconds * 3.6 > __DUEL_jumpSpeedKmh__ && j.at is number;
     }
-    function invalidEvidence(e) {
-      let w = e.get('windows', []);
-      let j = e.get('jumps', []);
-      return (w is list && w.size() == __DUEL_windowCount__ && fastWindow(w[0]) && fastWindow(w[1]) && fastWindow(w[2]))
-        || (j is list && j.size() == __DUEL_jumpCount__ && jump(j[0]) && jump(j[1]) && jump(j[2])
-          && j[0].at < j[1].at && j[1].at < j[2].at
-          && j[2].at - j[0].at <= __DUEL_jumpPeriodSeconds__);
+    function fastEvidence(report) {
+      return report.get('windows', []) is list && report.get('windows', []).size() == __DUEL_windowCount__
+        ? fastWindow(report.windows[0]) && fastWindow(report.windows[1]) && fastWindow(report.windows[2]) : false;
+    }
+    function jumpEvidence(report) {
+      return report.get('jumps', []) is list && report.get('jumps', []).size() == __DUEL_jumpCount__
+        ? jump(report.jumps[0]) && jump(report.jumps[1]) && jump(report.jumps[2])
+          && report.jumps[0].at < report.jumps[1].at && report.jumps[1].at < report.jumps[2].at
+          && report.jumps[2].at - report.jumps[0].at <= __DUEL_jumpPeriodSeconds__ : false;
+    }
+    function invalidEvidence(report) {
+      return fastEvidence(report) ? true : jumpEvidence(report);
+    }
+    function receiptPath(id) { return /databases/$(database)/documents/duel_reward_receipts/$(id); }
+    function sealedCoverage(d, f) {
+      return d.get('reward_protocol', 1) != 2 || (f.get('fix_count', 0) is int && f.get('fix_count', 0) >= 3
+        && f.get('first_at', null) is timestamp && f.first_at >= d.started_at
+        && f.first_at <= d.started_at + duration.value(30, 's')
+        && f.get('observed_at', null) is timestamp && f.observed_at <= d.validating_at
+        && f.observed_at >= d.validating_at - duration.value(15, 's')
+        && f.observed_at >= f.first_at + duration.value(10, 's'));
+    }
+    // The detector latches at the third qualifying window/jump. Clean sealed
+    // reports therefore contain fewer than that threshold, including zero.
+    function cleanEvidence(report) {
+      return report.get('windows', []) is list && report.get('windows', []).size() < __DUEL_windowCount__
+        && report.get('jumps', []) is list && report.get('jumps', []).size() < __DUEL_jumpCount__;
     }
     function cleanFinal(d, uid) {
       let f = d.get('finals', {}).get(uid, {});
-      return f.get('invalid', true) == false && f.get('for', null) == d.validating_at && !invalidEvidence(f);
+      return f.get('invalid', true) == false && f.get('for', null) == d.validating_at && cleanEvidence(f);
     }
     function validatedDuel(d) {
       return d.get('protocol', 0) == __DUEL_version__ && d.status == 'done'
@@ -692,23 +730,30 @@ service cloud.firestore {
             && n.forfeit_by == request.auth.uid && n.candidate == otherOf(d) && n.by_default == true)
         ))) ;
     }
-    function validatingChange(d, n, id) {
+    function finalReportOk(d, n) {
       let uid = request.auth.uid;
-      let f = n.get('finals', {}).get(uid, {});
-      return validationLive(d) && (
-        (n.status == 'validating' && nextKeys(['finals', 'progress']) && ownKeyOnly('finals')
-          && !(uid in d.finals) && f.keys().hasOnly(['invalid', 'windows', 'jumps', 'observed_at', 'for'])
-          && f.get('invalid', true) == false && f.get('for', null) == d.validating_at && !invalidEvidence(f)
-          && progressOk(d, n, d.validating_at))
-        || (n.status == 'done' && nextKeys(['status', 'winner', 'prize', 'finished_at', 'validated_at'])
-          && d.candidate == uid && n.winner == uid && cleanFinal(d, d.from) && cleanFinal(d, d.to)
-          && stamped(n, 'finished_at') && stamped(n, 'validated_at') && n.prize is int && n.prize >= 0
-          && n.prize <= d.reward && (d.by_default == true
-            ? (myProg(d) < 0.2 ? n.prize == 0 : n.prize <= d.reward * (myProg(d) >= d.distance_km ? 1.0 : myProg(d) / d.distance_km))
-            : myProg(d) >= d.distance_km)
-          && (n.prize == 0 || (getAfter(userDoc(uid)).data.last_duel_id == id
-            && getAfter(userDoc(uid)).data.coins == get(userDoc(uid)).data.coins + n.prize)))
-      );
+      let report = n.get('finals', {}).get(uid, {});
+      return nextKeys(['finals', 'progress']) && ownKeyOnly('finals') && !(uid in d.finals)
+        && report.keys().hasOnly(['invalid', 'windows', 'jumps', 'observed_at', 'first_at', 'fix_count', 'for'])
+        && report.get('invalid', true) == false && report.get('for', null) == d.validating_at
+        && sealedCoverage(d, report) && cleanEvidence(report) && progressOk(d, n, d.validating_at);
+    }
+    function settlementOk(d, n, id) {
+      let uid = request.auth.uid;
+      return nextKeys(['status', 'winner', 'prize', 'finished_at', 'validated_at', 'reward_receipt'])
+        && d.candidate == uid && n.winner == uid && cleanFinal(d, d.from) && cleanFinal(d, d.to)
+        && n.reward_receipt == id && !exists(receiptPath(id))
+        && getAfter(receiptPath(id)).data.winner == uid && getAfter(receiptPath(id)).data.prize == n.prize
+        && stamped(n, 'finished_at') && stamped(n, 'validated_at') && n.prize is int && n.prize >= 0
+        && n.prize <= d.reward && (d.by_default == true
+          ? (myProg(d) < 0.2 ? n.prize == 0 : n.prize <= d.reward * (myProg(d) >= d.distance_km ? 1.0 : myProg(d) / d.distance_km))
+          : myProg(d) >= d.distance_km)
+        && (n.prize == 0 ? true : (getAfter(userDoc(uid)).data.last_duel_id == id
+          && getAfter(userDoc(uid)).data.coins == get(userDoc(uid)).data.coins + n.prize));
+    }
+    function validatingChange(d, n, id) {
+      return validationLive(d) && (n.status == 'validating' ? finalReportOk(d, n)
+        : n.status == 'done' && settlementOk(d, n, id));
     }
     function invalidChange(d, n, id) {
       return d.status in ['active', 'validating'] && n.status == 'invalid'
@@ -738,8 +783,9 @@ service cloud.firestore {
     match /challenges/{cid} {
       allow read: if signedIn() && request.auth.uid in resource.data.participants;
       allow create: if signedIn() && request.resource.data.keys().hasOnly(['protocol', 'participants', 'from', 'to',
-          'from_name', 'to_name', 'distance_km', 'reward', 'status', 'ready', 'progress', 'seen', 'finals', 'created_at'])
-        && request.resource.data.protocol == __DUEL_version__ && request.resource.data.from == request.auth.uid
+          'from_name', 'to_name', 'distance_km', 'reward', 'status', 'ready', 'progress', 'seen', 'finals', 'created_at', 'reward_protocol'])
+        && request.resource.data.protocol == __DUEL_version__ && request.resource.data.reward_protocol == 2
+        && request.resource.data.from == request.auth.uid
         && request.resource.data.participants == [request.auth.uid, request.resource.data.to]
         && request.resource.data.to is string && request.resource.data.to != request.auth.uid
         && request.resource.data.status == 'pending' && stamped(request.resource.data, 'created_at')
@@ -763,9 +809,12 @@ service cloud.firestore {
         (resource.data.get('protocol', 0) != __DUEL_version__ && resource.data.status in ['pending', 'lobby', 'countdown', 'active', 'forfeit']
           && request.resource.data.status == 'expired' && nextKeys(['status', 'finished_at']) && stamped(request.resource.data, 'finished_at'))
         || (resource.data.get('protocol', 0) == __DUEL_version__ && !terminal(resource.data)
-          && (pendingChange(resource.data, request.resource.data, cid) || liveChange(resource.data, request.resource.data, cid)
-            || activeChange(resource.data, request.resource.data) || validatingChange(resource.data, request.resource.data, cid)
-            || invalidChange(resource.data, request.resource.data, cid) || closeChange(resource.data, request.resource.data, cid)))
+          && (request.resource.data.status == 'invalid' ? invalidChange(resource.data, request.resource.data, cid)
+            : request.resource.data.status in ['expired', 'unverified'] ? closeChange(resource.data, request.resource.data, cid)
+            : resource.data.status == 'pending' ? pendingChange(resource.data, request.resource.data, cid)
+            : resource.data.status in ['lobby', 'countdown'] ? liveChange(resource.data, request.resource.data, cid)
+            : resource.data.status == 'active' ? activeChange(resource.data, request.resource.data)
+            : validatingChange(resource.data, request.resource.data, cid)))
       );
       allow delete: if false;
     }
@@ -803,10 +852,28 @@ service cloud.firestore {
             || ((isMe(uid) || nextKeys(['kind', 'updated_at'])) && slotRelease(resource.data, request.resource.data, uid))
             || slotReserve(resource.data, request.resource.data, uid)
             || (isMe(uid) && resource.data.kind == 'solo' && request.resource.data.kind == 'available'
-              && request.resource.data.session_id == resource.data.session_id && nextKeys(['kind', 'updated_at']))
+              && (request.resource.data.session_id == resource.data.session_id
+                  || request.time >= resource.data.updated_at + duration.value(__DUEL_presenceSeconds__, 's'))
+                && nextKeys(['kind', 'updated_at', 'session_id']))
           ))
         );
       allow delete: if isMe(uid) && resource.data.kind == 'available';
+    }
+    match /duel_reward_receipts/{id} {
+      allow get: if signedIn() && request.auth.uid in get(challengePath(id)).data.participants;
+      allow list: if false;
+      allow create: if signedIn() && rewardReceiptOk(id);
+      allow update, delete: if false;
+    }
+    function rewardReceiptOk(id) {
+      let r = request.resource.data;
+      let before = get(challengePath(id)).data;
+      let after = getAfter(challengePath(id)).data;
+      return r.keys().hasOnly(['challenge_id', 'participants', 'winner', 'prize', 'validated_at'])
+        && r.challenge_id == id && r.participants == before.participants && r.winner == request.auth.uid
+        && before.status == 'validating' && before.candidate == request.auth.uid && after.status == 'done'
+        && after.winner == r.winner && after.prize == r.prize && after.reward_receipt == id
+        && stamped(r, 'validated_at') && after.validated_at == request.time;
     }
     match /duel_cooldowns/{from}/recipients/{to} {
       allow get: if signedIn() && request.auth.uid in [from, to];
@@ -840,8 +907,11 @@ service cloud.firestore {
     }
 
     match /chats/{chatId} {
-      allow read: if signedIn() && request.auth.uid in chatId.split('_')
+      allow get: if signedIn() && request.auth.uid in chatId.split('_')
         && request.auth.uid in resource.data.members;
+      // A members/array-contains query cannot prove a document-ID expression.
+      // Creation/update still validates members against the two ID owners.
+      allow list: if signedIn() && request.auth.uid in resource.data.members;
       allow create, update: if signedIn()
         && request.resource.data.members.hasOnly(chatId.split('_'))
         && request.resource.data.members.size() == 2

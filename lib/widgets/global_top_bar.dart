@@ -2,7 +2,6 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
-import '../screens/auth/login_screen.dart';
 import '../utils/player_stats.dart';
 import '../services/sound.dart';
 import '../services/presence.dart';
@@ -217,12 +216,7 @@ Future<void> confirmLogout(BuildContext context) async {
 
   await Presence.I.stop(); // friends see you go offline right away
   await FirebaseAuth.instance.signOut();
-  // MainShell may have been pushed with pushAndRemoveUntil (after sign-up /
-  // character creation), so the auth gate isn't guaranteed to be underneath.
-  nav.pushAndRemoveUntil(
-    MaterialPageRoute(builder: (_) => const LoginScreen()),
-    (_) => false,
-  );
+  nav.popUntil((route) => route.isFirst);
 }
 
 /// ON / OFF block for the SOUND and MUSIC settings.

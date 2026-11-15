@@ -1,14 +1,20 @@
 // Run with Java 21 available:
 // firebase emulators:exec --project demo-hakbanghero-duels --only "auth,firestore" "node --test test/firestore_duel_rules_test.mjs"
 // Uses Node built-ins and emulator REST APIs; never connects to live Firebase.
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 
 const project = 'demo-hakbanghero-duels';
 const firestore = process.env.FIRESTORE_EMULATOR_HOST;
 const auth = process.env.FIREBASE_AUTH_EMULATOR_HOST;
 const emulator = Boolean(firestore && auth);
+after(async () => {
+  if (!emulator) return;
+  const r = await fetch(`http://${firestore}/emulator/v1/projects/${project}:ruleCoverage`);
+  mkdirSync(new URL('../build/audit', import.meta.url), { recursive: true });
+  writeFileSync(new URL('../build/audit/rules-coverage.json', import.meta.url), await r.text());
+});
 for (const host of [firestore, auth].filter(Boolean)) {
   assert.match(host, /^(127\.0\.0\.1|localhost):\d+$/, 'Only local emulators are permitted.');
 }
@@ -34,6 +40,7 @@ test('duel reward prerequisites apply before existing tester alternatives', () =
 });
 
 const stamp = Symbol('server timestamp');
+const fieldPath = path => path.split('.').map(p => /^[A-Za-z_][A-Za-z_0-9]*$/.test(p) ? p : '`' + p.replaceAll('`', '\\`') + '`').join('.');
 function encode(value) {
   if (value instanceof Date) return { timestampValue: value.toISOString() };
   if (value === null) return { nullValue: null };
@@ -53,9 +60,9 @@ function write(path, fields, merge = false) {
   }
   return {
     update: { name: `projects/${project}/databases/(default)/documents/${path}`, fields: encode(data).mapValue.fields },
-    ...(merge ? { updateMask: { fieldPaths: Object.keys(fields).filter((key) => fields[key] !== stamp) } } : {}),
+    ...(merge ? { currentDocument: { exists: true }, updateMask: { fieldPaths: Object.keys(fields).filter((key) => fields[key] !== stamp).map(fieldPath) } } : {}),
     updateTransforms: Object.keys(fields).filter((key) => fields[key] === stamp)
-      .map((fieldPath) => ({ fieldPath, setToServerValue: 'REQUEST_TIME' })),
+      .map((path) => ({ fieldPath: fieldPath(path), setToServerValue: 'REQUEST_TIME' })),
   };
 }
 async function commit(token, writes) {
@@ -86,7 +93,7 @@ async function pair() {
   writes.push(write(`users/${a.id}/friends/${b.id}`, { name: 'B' }));
   writes.push(write(`users/${b.id}/friends/${a.id}`, { name: 'A' }));
   pass(await commit('owner', writes));
-  const data = { protocol: 2, participants: [a.id, b.id], from: a.id, to: b.id, from_name: 'A', to_name: 'B',
+  const data = { protocol: 2, reward_protocol: 2, participants: [a.id, b.id], from: a.id, to: b.id, from_name: 'A', to_name: 'B',
     distance_km: 1, reward: 200, status: 'pending', ready: { [a.id]: false, [b.id]: false },
     progress: { [a.id]: 0, [b.id]: 0 }, seen: {}, finals: {}, created_at: at };
   const invite = (cid = id) => [write(`challenges/${cid}`, { ...data, created_at: stamp }),
@@ -99,6 +106,10 @@ async function active(p, status = 'active') {
     validating_at: cutoff, by_default: false, progress: { [p.a.id]: 1, [p.b.id]: 0.8 } };
   pass(await commit('owner', [write(`challenges/${p.id}`, d), ...[p.a, p.b].map((u) =>
     write(`player_activity/${u.id}`, { kind: 'duel', challenge_id: p.id, updated_at: stamp }, true))]));
+  const check = await fetch(`http://${firestore}/v1/projects/${project}/databases/(default)/documents/challenges/${p.id}`,
+    { headers: { Authorization: `Bearer ${p.a.token}` } });
+  assert.equal(check.status, 200, await check.clone().text());
+  assert.equal((await check.json()).fields.status.stringValue, status);
   return d;
 }
 const local = { skip: emulator ? false : 'Blocked: local Auth/Firestore emulators require Java; not a backend verification result.' };
@@ -175,12 +186,13 @@ test('settlement needs both sealed final reports and credits the capped prize on
   const p = await pair(); const d = await active(p, 'validating');
   const day = Math.floor((Date.now() + 28800000) / 86400000);
   const settle = () => commit(p.a.token, [write(`challenges/${p.id}`, { status: 'done', winner: p.a.id,
-    prize: 200, finished_at: stamp, validated_at: stamp }, true), write(`users/${p.a.id}`, {
+    prize: 200, reward_receipt: p.id, finished_at: stamp, validated_at: stamp }, true),
+    write(`duel_reward_receipts/${p.id}`, { challenge_id: p.id, participants: p.data.participants, winner: p.a.id, prize: 200, validated_at: stamp }), write(`users/${p.a.id}`, {
     coins: 1200, coins_today: 200, coins_today_day: day, duel_prize_day: day, duel_prizes_today: 1, last_duel_id: p.id,
   }, true)]);
   deny(await settle());
   for (const u of [p.a, p.b]) pass(await commit(u.token, [write(`challenges/${p.id}`, {
-    [`finals.${u.id}`]: { invalid: false, windows: [], jumps: [], for: d.validating_at },
+    [`finals.${u.id}`]: { invalid: false, windows: [], jumps: [], for: d.validating_at, fix_count: 100, first_at: d.started_at, observed_at: d.validating_at },
   }, true)]));
   pass(await settle());
   deny(await settle());
@@ -190,12 +202,16 @@ test('invalidation racing with an incomplete settlement cannot leave a credited 
   const p = await pair(); await active(p, 'validating');
   const evidence = { invalid: true, observed_at: new Date(Date.now() - 500), jumps: [],
     windows: Array.from({ length: 3 }, () => ({ speed: 50, seconds: 10, fixes: 3, gap: 5 })) };
+  const invalidate = () => commit(p.b.token, [write(`challenges/${p.id}`, { status: 'invalid', invalidated_by: p.b.id,
+    invalid_reason: 'unrealistic_movement', invalid_evidence: evidence, finished_at: stamp }, true),
+    ...[p.a, p.b].map((u) => write(`player_activity/${u.id}`, { kind: 'available', updated_at: stamp }, true))]);
   const results = await Promise.all([
     commit(p.a.token, [write(`challenges/${p.id}`, { status: 'done', winner: p.a.id, prize: 200,
       finished_at: stamp, validated_at: stamp }, true)]),
-    commit(p.b.token, [write(`challenges/${p.id}`, { status: 'invalid', invalidated_by: p.b.id,
-      invalid_reason: 'unrealistic_movement', invalid_evidence: evidence, finished_at: stamp }, true),
-      ...[p.a, p.b].map((u) => write(`player_activity/${u.id}`, { kind: 'available', updated_at: stamp }, true))]),
+    invalidate(),
   ]);
-  assert.equal(results[0].status, 403, results[0].body); pass(results[1]);
+  assert.equal(results[0].status, 403, results[0].body);
+  // Concurrent REST commits can abort on the emulator's transaction lock.
+  // Retry only that transient conflict; permission failures must still fail.
+  pass(results[1].status === 409 ? await invalidate() : results[1]);
 });

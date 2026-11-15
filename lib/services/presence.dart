@@ -84,6 +84,11 @@ class Presence with WidgetsBindingObserver {
     _timer = null;
     _uid = null;
     _last = '';
+    _hold = false;
+    if (_observing) {
+      WidgetsBinding.instance.removeObserver(this);
+      _observing = false;
+    }
     if (uid == null) return;
     try {
       await _write(uid, 'offline').timeout(const Duration(seconds: 2));

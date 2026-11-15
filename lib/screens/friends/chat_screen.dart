@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../../services/friends_service.dart';
+import '../../services/chat_inbox.dart';
 import '../../utils/chat_filter.dart';
 import '../../widgets/block_ui.dart';
 
@@ -17,13 +18,15 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final _ctl = TextEditingController();
   final _scroll = ScrollController();
   late final String _me;
   bool _sending = false;
   DateTime _lastSent = DateTime.fromMillisecondsSinceEpoch(0);
   List<String> _recent = []; // newest-first texts, attached to a report as evidence
+  String? _lastReadMessage;
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _messageStream;
 
   // quick cheers for mid-challenge banter
   static const _quick = ['\u{1F525} Let\'s go!', '\u{1F44F} Nice run!', '\u{1F3C3} On my way', '\u{1F4AA} Rematch?'];
@@ -31,16 +34,32 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _me = FirebaseAuth.instance.currentUser?.uid ?? '';
+    _messageStream = FriendsService.chats
+        .doc(FriendsService.chatId(_me, widget.friendUid))
+        .collection('messages').orderBy('ts', descending: true).limit(100)
+        .snapshots(includeMetadataChanges: true);
+    ChatInbox.I.openChat = FriendsService.chatId(_me, widget.friendUid);
     FriendsService.markRead(_me, widget.friendUid);
   }
 
   @override
   void dispose() {
-    FriendsService.markRead(_me, widget.friendUid);
+    WidgetsBinding.instance.removeObserver(this);
+    if (ChatInbox.I.openChat == FriendsService.chatId(_me, widget.friendUid)) {
+      ChatInbox.I.openChat = null;
+    }
     _ctl.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && ModalRoute.of(context)?.isCurrent == true) {
+      FriendsService.markRead(_me, widget.friendUid);
+    }
   }
 
   Future<void> _send([String? preset]) async {
@@ -306,7 +325,6 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final id = FriendsService.chatId(_me, widget.friendUid);
     return Scaffold(
       backgroundColor: Rb.bg,
       body: SafeArea(
@@ -364,12 +382,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
             Expanded(
               child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-                stream: FriendsService.chats
-                    .doc(id)
-                    .collection('messages')
-                    .orderBy('ts', descending: true)
-                    .limit(100)
-                    .snapshots(),
+                stream: _messageStream,
                 builder: (context, snap) {
                   if (snap.hasError) {
                     return const Center(
@@ -388,7 +401,11 @@ class _ChatScreenState extends State<ChatScreen> {
                     );
                   }
                   // we are looking at it right now
-                  FriendsService.markRead(_me, widget.friendUid);
+                  if (ModalRoute.of(context)?.isCurrent == true && ChatInbox.I.foreground &&
+                      _lastReadMessage != docs.first.id) {
+                    _lastReadMessage = docs.first.id;
+                    FriendsService.markRead(_me, widget.friendUid);
+                  }
                   return ListView.builder(
                     controller: _scroll,
                     reverse: true, // newest at the bottom

@@ -8,6 +8,7 @@ import '../../widgets/block_ui.dart';
 import '../../widgets/pixel_icon.dart';
 import '../../widgets/hero_sprite.dart';
 import '../../services/friends_service.dart';
+import '../../widgets/chat_notification_host.dart' show ChatUnreadDot;
 import '../friends/friends_screen.dart';
 import '../../widgets/lottie_fx.dart';
 import '../../widgets/player_card_sheet.dart';
@@ -41,8 +42,7 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
     super.initState();
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) return;
-    _userSub = FirebaseFirestore.instance.collection('users').doc(uid)
-        .snapshots(includeMetadataChanges: true).listen((doc) {
+    _userSub = UserDoc.instance.stream.listen((doc) {
       if (!mounted || doc.metadata.hasPendingWrites) return;
       final data = doc.data() ?? {};
       final values = [doc.id, data['xp'], data['week_key'], data['week_km'],
@@ -78,13 +78,15 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
       if (me['week_key'] != key) return null;
       q = users
           .where('week_key', isEqualTo: key)
-          .where('week_km', isGreaterThan: (me['week_km'] as num?) ?? 0);
+          .where('week_km', isGreaterThan: (me['week_km'] as num?) ?? 0)
+          .orderBy('week_km', descending: true);
     } else if (idx == 1) {
       final key = monthKey(now);
       if (me['month_key'] != key) return null;
       q = users
           .where('month_key', isEqualTo: key)
-          .where('month_km', isGreaterThan: (me['month_km'] as num?) ?? 0);
+          .where('month_km', isGreaterThan: (me['month_km'] as num?) ?? 0)
+          .orderBy('month_km', descending: true);
     } else {
       q = users.where('xp', isGreaterThan: (me['xp'] as num?) ?? 0);
     }
@@ -353,7 +355,7 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
               onTap: () => Navigator.of(context).push(
                 MaterialPageRoute(builder: (_) => const FriendsScreen()),
               ),
-              child: const BlockText('\u{1F465} FRIENDS', size: 12, stroke: 3.5),
+              child: const ChatUnreadDot(child: BlockText('\u{1F465} FRIENDS', size: 12, stroke: 3.5)),
             ),
             if (pending > 0)
               Positioned(

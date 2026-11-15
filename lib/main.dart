@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'services/sound.dart';
 import 'services/presence.dart';
 import 'widgets/duel_invitation_host.dart';
+import 'widgets/chat_notification_host.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -14,35 +16,79 @@ import 'screens/startup_screen.dart';
 import 'firebase_options.dart';
 import 'services/private_data.dart';
 import 'services/legal_consent.dart';
+import 'services/google_auth.dart';
 import 'screens/auth/legal_consent_screen.dart';
 
 /// Run with  --dart-define=PERF_OVERLAY=true  to draw the frame graph.
 const bool kPerfOverlay = bool.fromEnvironment('PERF_OVERLAY');
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
   if (kDebugMode) _watchOverflows();
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
-  if (kIsWeb) {
-    // Keep data + not-yet-sent writes on the device (IndexedDB), so a run
-    // finished on weak signal still uploads after a reload.
-    try {
-      FirebaseFirestore.instance.settings =
-          const Settings(
-        persistenceEnabled: true,
-        // Safari / some networks block the normal live channel, so updates
-        // (coins after buying...) arrived minutes late. Fall back when needed.
-        webExperimentalAutoDetectLongPolling: true,
-      );
-    } catch (_) {}
+  runApp(const _FirebaseStartup());
+}
+
+class _FirebaseStartup extends StatefulWidget {
+  const _FirebaseStartup();
+  @override
+  State<_FirebaseStartup> createState() => _FirebaseStartupState();
+}
+
+class _FirebaseStartupState extends State<_FirebaseStartup> {
+  late Future<void> _startup = _initialize();
+  Future<FirebaseApp>? _firebase;
+
+  Future<void> _initialize() async {
+    _firebase ??= Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform)
+        .onError((Object error, StackTrace stack) {
+      _firebase = null;
+      Error.throwWithStackTrace(error, stack);
+    });
+    await _firebase!.timeout(const Duration(seconds: 20));
+    if (kIsWeb) {
+      // Keep data + not-yet-sent writes on the device (IndexedDB), so a run
+      // finished on weak signal still uploads after a reload.
+      try {
+        FirebaseFirestore.instance.settings = const Settings(
+          persistenceEnabled: true,
+          // Safari / some networks block the normal live channel, so updates
+          // (coins after buying...) arrived minutes late. Fall back when needed.
+          webExperimentalAutoDetectLongPolling: true,
+        );
+      } catch (_) {}
+    }
+    // Sound is optional: never let it hold up the app.
+    unawaited(
+      Sound.I
+          .init()
+          .timeout(const Duration(seconds: 3))
+          .catchError((Object _) {}),
+    );
   }
-  // Sound is optional: never let it hold up the app.
-  try {
-    await Sound.I.init().timeout(const Duration(seconds: 3));
-  } catch (_) {}
-  runApp(const HakbangHeroApp());
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<void>(
+    future: _startup,
+    builder: (context, snapshot) {
+      if (snapshot.connectionState == ConnectionState.done &&
+          !snapshot.hasError) {
+        return const HakbangHeroApp();
+      }
+      return MaterialApp(
+        home: StartupView(
+          progress: 0.03,
+          status: snapshot.hasError
+              ? 'COULD NOT CONNECT. CHECK YOUR NETWORK.'
+              : 'STARTING...',
+          failed: snapshot.hasError,
+          stuck: snapshot.hasError,
+          onRetry: snapshot.hasError
+              ? () => setState(() => _startup = _initialize())
+              : null,
+        ),
+      );
+    },
+  );
 }
 
 /// Debug builds only: prints ONE short line per layout overflow with the
@@ -55,13 +101,15 @@ void _watchOverflows() {
   FlutterError.onError = (details) {
     final text = details.toString();
     if (text.contains('overflowed by')) {
-      final px = RegExp(r'overflowed by ([\d.]+) pixels')
-          .firstMatch(text)
-          ?.group(1);
-      final where = RegExp(r'(lib/[\w/]+\.dart:\d+)').firstMatch(text)?.group(1);
-      final widget = RegExp(r'error-causing widget was:\s*(\w+)')
-          .firstMatch(text)
-          ?.group(1);
+      final px = RegExp(
+        r'overflowed by ([\d.]+) pixels',
+      ).firstMatch(text)?.group(1);
+      final where = RegExp(
+        r'(lib/[\w/]+\.dart:\d+)',
+      ).firstMatch(text)?.group(1);
+      final widget = RegExp(
+        r'error-causing widget was:\s*(\w+)',
+      ).firstMatch(text)?.group(1);
       final line = '[overflow] ${px}px  ${widget ?? '?'}  ${where ?? '?'}';
       if (seen.add(line)) debugPrint(line);
     }
@@ -86,11 +134,13 @@ class HakbangHeroApp extends StatelessWidget {
           Sound.I.userGesture();
           Presence.I.touch();
         },
-        child: DuelInvitationHost(child: child ?? const SizedBox.shrink()),
+        child: ChatNotificationHost(
+          child: DuelInvitationHost(child: child ?? const SizedBox.shrink())),
       ),
       theme: ThemeData(
         brightness: Brightness.dark,
-        fontFamily: 'Nunito', // bundled, see pubspec.yaml (BlockText uses Lilita One)
+        fontFamily:
+            'Nunito', // bundled, see pubspec.yaml (BlockText uses Lilita One)
         scaffoldBackgroundColor: const Color(0xFF060C06),
         colorScheme: const ColorScheme.dark(
           primary: Color(0xFF00FF41),
@@ -138,31 +188,66 @@ class _SilentLoginState extends State<_SilentLogin> {
   Widget build(BuildContext context) => const LoginScreen();
 }
 
-class _AuthGate extends StatelessWidget {
+class _AuthGate extends StatefulWidget {
   const _AuthGate();
+
+  @override
+  State<_AuthGate> createState() => _AuthGateState();
+}
+
+class _AuthGateState extends State<_AuthGate> {
+  late Stream<User?> _auth = _watch().distinct((a, b) => a?.uid == b?.uid);
+
+  Stream<User?> _watch() async* {
+    final auth = FirebaseAuth.instance;
+    yield await auth
+        .authStateChanges()
+        .timeout(const Duration(seconds: 20))
+        .first;
+    yield* auth.authStateChanges();
+  }
 
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<User?>(
-      stream: FirebaseAuth.instance.authStateChanges(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const StartupView(progress: 0.03, status: 'STARTING...');
-        }
-        final user = snapshot.data;
-        if (user != null) {
-          // loading screen (profile, hero art, icons, effects), then the app
-          return StartupGate(
-            key: ValueKey(user.uid),
-            uid: user.uid,
-            child: const ProfileCompletionGate(),
-          );
-        }
-        return const _SilentLogin();
-      },
+      stream: _auth,
+      builder: (context, snapshot) => ValueListenableBuilder<bool>(
+        valueListenable: GoogleAuth.inProgress,
+        builder: (context, signingUp, _) {
+          if (signingUp) return const _SilentLogin();
+          if (snapshot.hasError) {
+            return StartupView(
+              progress: 0.03,
+              status: 'COULD NOT RESTORE SIGN-IN',
+              failed: true,
+              stuck: true,
+              onRetry: () => setState(() {
+                _auth = _watch().distinct((a, b) => a?.uid == b?.uid);
+              }),
+            );
+          }
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const StartupView(progress: 0.03, status: 'STARTING...');
+          }
+          final user = snapshot.data;
+          if (user != null) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              duelNavigatorKey.currentState?.popUntil((route) => route.isFirst);
+            });
+            // loading screen (profile, hero art, icons, effects), then the app
+            return StartupGate(
+              key: ValueKey(user.uid),
+              uid: user.uid,
+              child: const ProfileCompletionGate(),
+            );
+          }
+          return const _SilentLogin();
+        },
+      ),
     );
   }
 }
+
 /// Both sign-in methods and app restarts use the same required profile check.
 class ProfileCompletionGate extends StatefulWidget {
   const ProfileCompletionGate({super.key});
@@ -184,11 +269,19 @@ class _ProfileCompletionGateState extends State<ProfileCompletionGate> {
   Future<Map<String, dynamic>> _read() async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) throw StateError('Please sign in again.');
-    await UserDoc.instance.stream.firstWhere(
-      (doc) => doc.exists,
-    ).timeout(const Duration(seconds: 12));
+    final user = FirebaseAuth.instance.currentUser!;
+    final document = await UserDoc.instance.stream.first.timeout(
+      const Duration(seconds: 8),
+    );
+    if (!document.exists) {
+      await GoogleAuth.ensureUserDoc(
+        user,
+        user.displayName ?? 'Hero',
+      ).timeout(const Duration(seconds: 20));
+    }
     final profile = await PrivateData.readProfile(uid);
-    _needsConsent = LegalConsent.requiredFor(profile) &&
+    _needsConsent =
+        LegalConsent.requiredFor(profile) &&
         !await LegalConsent.hasAccepted(uid);
     return profile;
   }
@@ -201,22 +294,33 @@ class _ProfileCompletionGateState extends State<ProfileCompletionGate> {
       future: _profile,
       builder: (context, profile) {
         if (profile.connectionState != ConnectionState.done) {
-          return const StartupView(status: 'LOADING YOUR PROFILE...', progress: 0.5);
+          return const StartupView(
+            status: 'LOADING YOUR PROFILE...',
+            progress: 0.5,
+          );
         }
         if (profile.hasError) {
           return StartupView(
-            status: 'COULD NOT LOAD YOUR PROFILE', progress: 0.5,
-            failed: true, stuck: true,
+            status: 'COULD NOT LOAD YOUR PROFILE',
+            progress: 0.5,
+            failed: true,
+            stuck: true,
             onRetry: () => setState(() => _profile = _read()),
           );
         }
         if (_needsConsent) {
-          return LegalConsentScreen(onAccepted: () {
-            setState(() => _profile = _read());
-          });
+          return LegalConsentScreen(
+            onAccepted: () {
+              setState(() => _profile = _read());
+            },
+          );
         }
         if (!PrivateData.profileComplete(profile.data!)) {
-          return const CharacterCreationScreen();
+          return CharacterCreationScreen(
+            onCompleted: () {
+              setState(() => _profile = _read());
+            },
+          );
         }
         return const MainShell();
       },

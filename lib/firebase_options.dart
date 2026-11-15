@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
 
 class DefaultFirebaseOptions {
+  static const googleServerClientId = '467538787680-h4lrgtfsrp0n83oudntpuj6otid33bt8.apps.googleusercontent.com';
+
   static FirebaseOptions get currentPlatform {
     if (kIsWeb) return web;
     switch (defaultTargetPlatform) {
@@ -31,12 +33,12 @@ class DefaultFirebaseOptions {
 
   // ── Android (same project, add SHA later for Google Sign-In) ─────────────
   static const FirebaseOptions android = FirebaseOptions(
-    apiKey: 'AIzaSyAngLALLuq_d2nkTdh13yNsYoKDpat0X8U',
+    apiKey: 'AIzaSyChl8nzlhD1tZ1e8BH1KnrBUuH5funvz-w',
     authDomain: 'hakbanghero.firebaseapp.com',
     projectId: 'hakbanghero',
     storageBucket: 'hakbanghero.firebasestorage.app',
     messagingSenderId: '467538787680',
-    appId: '1:467538787680:web:a259d6319fbae7c6b9f205',
+    appId: '1:467538787680:android:1e89069ed5f22a77b9f205',
   );
 
   // ── iOS ──────────────────────────────────────────────────────────────────

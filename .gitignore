@@ -46,5 +46,6 @@ app.*.map.json
 
 # Firebase CLI deploy cache + local build logs
 .firebase/
+tools/firebase-tests/node_modules/
 build_log.txt
 flutter_*.log

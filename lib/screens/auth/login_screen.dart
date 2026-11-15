@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import '../../services/google_auth.dart';
 import '../../widgets/block_inputs.dart';
 import '../../widgets/block_ui.dart';
-import '../../main.dart' show ProfileCompletionGate;
 import 'forgot_password_screen.dart';
 import 'signup_screen.dart';
 
@@ -24,10 +23,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _goHome() async {
     if (!mounted) return;
-    Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => const ProfileCompletionGate()),
-      (_) => false,
-    );
+    Navigator.of(context).popUntil((route) => route.isFirst);
   }
 
   void _snack(String msg) {
@@ -36,6 +32,7 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _loginEmail() async {
+    if (_loading) return;
     final email = _emailCtrl.text.trim();
     final pass = _passCtrl.text; // never trim a password
     if (email.isEmpty || pass.isEmpty) {
@@ -45,10 +42,13 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _loading = true);
     try {
       await FirebaseAuth.instance
-          .signInWithEmailAndPassword(email: email, password: pass);
+          .signInWithEmailAndPassword(email: email, password: pass)
+          .timeout(const Duration(seconds: 30));
       _goHome();
     } on FirebaseAuthException catch (e) {
       _snack(e.message ?? 'Login failed.');
+    } catch (_) {
+      _snack('Sign-in is not confirmed yet. Check your connection and retry.');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -56,7 +56,9 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _loginGoogle() async {
     setState(() => _loading = true);
-    final r = await GoogleAuth.signIn();
+    final r = await GoogleAuth.signIn().timeout(const Duration(seconds: 60),
+      onTimeout: () => const GoogleAuthResult(message:
+        'Sign-in is still unconfirmed. Reconnect or return to the login screen.'));
     if (!mounted) return;
     setState(() => _loading = false);
     if (r.ok) {

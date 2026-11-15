@@ -18,7 +18,16 @@
     ],
     "headers": [
       {
-        "source": "**/*.@(html|json|js)",
+        "source": "/",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          }
+        ]
+      },
+      {
+        "source": "**/*.@(html|json|js|wasm)",
         "headers": [
           {
             "key": "Cache-Control",

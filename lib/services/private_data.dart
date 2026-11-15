@@ -2,6 +2,7 @@ import '../utils/quick_get.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import '../models/hero_roster.dart' show genderKey;
+import '../state/user_doc.dart';
 
 /// Data only the player can see: users/{uid}/private/body
 ///   { email, height_cm, weight_kg }
@@ -31,8 +32,9 @@ abstract final class PrivateData {
 
   /// Unlike optional profile reads, onboarding must not hide a read failure.
   static Future<Map<String, dynamic>> readProfile(String uid) async {
-    final user = await FirebaseFirestore.instance
-        .collection('users').doc(uid).get().timeout(kQuickWait);
+    final cached = UserDoc.instance.snapshotFor(uid);
+    final user = cached != null && !cached.metadata.hasPendingWrites ? cached :
+        await FirebaseFirestore.instance.collection('users').doc(uid).get().timeout(kQuickWait);
     if (!user.exists || user.metadata.hasPendingWrites) {
       throw StateError('Your account is still being saved. Please retry.');
     }

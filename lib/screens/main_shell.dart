@@ -43,6 +43,7 @@ class _MainShellState extends State<MainShell> {
   void dispose() {
     _friendWatcher?.dispose();
     DuelCoordinator.I.stop();
+    Presence.I.stop();
     super.dispose();
   }
   // 0 = SHOP, 1 = GEAR, 2 = RUN, 3 = RANKS, 4 = ACTIVITY, 5 = PROFILE

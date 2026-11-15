@@ -8,6 +8,7 @@ import 'run_checkpoint.dart';
 import 'usernames.dart';
 import 'legal_consent.dart';
 import 'costume_usage.dart';
+import 'google_auth.dart';
 
 /// Permanently deletes the signed-in player's account (Google Play requires
 /// this inside the app): runs, weight history, private data, friendships,
@@ -41,7 +42,7 @@ abstract final class AccountDeletion {
     if (kIsWeb) {
       await user.reauthenticateWithPopup(google);
     } else {
-      await user.reauthenticateWithProvider(google);
+      await user.reauthenticateWithCredential(await GoogleAuth.nativeCredential());
     }
   }
 

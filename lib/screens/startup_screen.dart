@@ -149,7 +149,13 @@ class _StartupGateState extends State<StartupGate> {
       setState(() => _creep += (0.9 - _creep) * 0.04);
     });
 
-    final tasks = _tasks();
+    final all = _tasks();
+    // Art, effects and outbox sync must not gate the first usable screen.
+    // Their own bounded tasks continue in the background.
+    for (final task in all.where((t) => !t.critical)) {
+      unawaited(task.run().timeout(task.timeout).catchError((Object _) {}));
+    }
+    final tasks = all.where((t) => t.critical).toList();
     final total = tasks.fold<double>(0, (s, t) => s + t.weight);
     final pending = <String>[for (final t in tasks) t.label];
     var done = 0.0;

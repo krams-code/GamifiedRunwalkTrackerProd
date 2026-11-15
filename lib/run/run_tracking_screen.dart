@@ -1284,7 +1284,13 @@ class _RunTrackingScreenState extends State<RunTrackingScreen>
       _savedOffline = true;
       _saveError = 'You are signed out. This run has not been saved.';
     }
-    if (safeToClear) await RunCheckpoint.clear();
+    if (safeToClear) {
+      try {
+        await RunCheckpoint.clear().timeout(const Duration(seconds: 5));
+      } catch (e) {
+        debugPrint('Run retained, but checkpoint cleanup is pending: $e');
+      }
+    }
     _frozenClock = false;
 
     if (mounted) {

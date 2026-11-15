@@ -501,7 +501,7 @@ abstract final class RunCloud {
   /// The run was counted: remove its cloud copy.
   static Future<void> done(String uid, String id) async {
     try {
-      await _col(uid).doc(id).delete();
+      await _col(uid).doc(id).delete().timeout(const Duration(seconds: 8));
     } catch (e) {
       debugPrint('pending_runs delete: $e');
     }

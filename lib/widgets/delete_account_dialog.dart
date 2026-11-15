@@ -2,7 +2,6 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'emoji_icons.dart';
 import 'package:flutter/material.dart';
 
-import '../screens/auth/login_screen.dart';
 import '../services/account_deletion.dart';
 import 'block_ui.dart';
 
@@ -16,10 +15,7 @@ Future<void> showDeleteAccountDialog(BuildContext context) async {
     builder: (_) => const _DeleteAccountDialog(),
   );
   if (done == true) {
-    nav.pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => const LoginScreen()),
-      (_) => false,
-    );
+    nav.popUntil((route) => route.isFirst);
   }
 }
 

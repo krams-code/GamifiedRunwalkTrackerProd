@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../screens/friends/friends_screen.dart';
 import '../services/friends_service.dart';
+import 'chat_notification_host.dart' show ChatUnreadDot;
 import '../utils/weekly.dart';
 import 'block_ui.dart';
 import 'hero_bust.dart';
@@ -111,7 +112,7 @@ class _FriendsWeekCardState extends State<FriendsWeekCard> {
                     color: const Color(0xFFD7F5E8)),
               ),
             const SizedBox(height: 8),
-            PressBlock(
+            ChatUnreadDot(child: PressBlock(
               color: Rb.blue,
               edge: Rb.blueEdge,
               depth: 5,
@@ -122,7 +123,7 @@ class _FriendsWeekCardState extends State<FriendsWeekCard> {
                 width: double.infinity,
                 child: Center(child: BlockText('ADD A FRIEND', size: 14, stroke: 3.5)),
               ),
-            ),
+            )),
           ]
           else ...[
             for (var i = 0; i < rows.length && i < 5; i++) _row(i, rows[i], rows.first.km),
@@ -133,7 +134,7 @@ class _FriendsWeekCardState extends State<FriendsWeekCard> {
                     color: const Color(0xFFB8D4C8)),
               ),
             const SizedBox(height: 8),
-            PressBlock(
+            ChatUnreadDot(child: PressBlock(
               color: Rb.panel,
               edge: Rb.panelEdge,
               depth: 4,
@@ -144,7 +145,7 @@ class _FriendsWeekCardState extends State<FriendsWeekCard> {
                 width: double.infinity,
                 child: Center(child: BlockText('OPEN FRIENDS • CHAT • DUELS', size: 11, stroke: 3)),
               ),
-            ),
+            )),
           ],
         ],
       ),

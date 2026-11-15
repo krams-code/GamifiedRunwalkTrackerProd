@@ -3,8 +3,11 @@ import 'dart:typed_data';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import '../services/run_summary_export.dart';
 import '../models/run_summary_export.dart';
+import '../services/run_image_browser.dart'
+    if (dart.library.js_interop) '../services/run_image_browser_web.dart';
 import 'block_inputs.dart';
 import 'block_ui.dart';
 
@@ -25,6 +28,10 @@ class _RunSummaryActionsState extends State<RunSummaryActions> {
   String? _error;
   bool _preparing = false;
   bool _busy = false;
+  PreparedRunImage? _browserImage;
+  Timer? _waiting;
+  int _attempt = 0;
+  Future<Uint8List>? _rendering;
 
   @override
   void initState() {
@@ -33,12 +40,19 @@ class _RunSummaryActionsState extends State<RunSummaryActions> {
   }
 
   void _listen() {
+    final attempt = ++_attempt;
+    _waiting?.cancel();
     final uid = widget.ownerUid, id = widget.runId;
     if (uid == null || id == null) return;
     _subscription?.cancel();
+    _waiting = Timer(const Duration(seconds: 20), () {
+      if (mounted && attempt == _attempt && _png == null) {
+        setState(() => _error = 'The run is not confirmed yet. Reconnect and tap RETRY.');
+      }
+    });
     _subscription = FirebaseFirestore.instance.collection('users').doc(uid)
         .collection('activities').doc(id).snapshots(includeMetadataChanges: true).listen((doc) async {
-      if (!mounted || _png != null || _preparing || !doc.exists ||
+      if (!mounted || attempt != _attempt || _png != null || _preparing || !doc.exists ||
           doc.metadata.hasPendingWrites || doc.metadata.isFromCache) {
         return;
       }
@@ -46,22 +60,43 @@ class _RunSummaryActionsState extends State<RunSummaryActions> {
       try {
         final summary = RunSummaryExportService.confirmed(doc);
         widget.onConfirmed?.call(summary);
-        final png = await RunSummaryExportService.render(summary);
-        if (mounted) setState(() { _png = png; _name = summary.fileName; });
+        _rendering ??= RunSummaryExportService.render(summary);
+        final png = await _rendering!.timeout(const Duration(seconds: 20));
+        if (mounted && attempt == _attempt) {
+          _waiting?.cancel();
+          _browserImage?.dispose();
+          if (kIsWeb) _browserImage = PreparedRunImage(png, summary.fileName);
+          setState(() { _png = png; _name = summary.fileName; _error = null; });
+        }
       } catch (e) {
-        if (mounted) setState(() => _error = 'Image unavailable: ${e.toString().replaceFirst('Bad state: ', '')}');
+        if (attempt == _attempt && e is! TimeoutException) _rendering = null;
+        if (mounted && attempt == _attempt) setState(() => _error = 'Could not prepare the saved run image. Tap RETRY.');
       } finally {
-        if (mounted) setState(() => _preparing = false);
+        if (mounted && attempt == _attempt) setState(() => _preparing = false);
       }
     }, onError: (Object e) {
-      if (mounted) setState(() => _error = 'Could not load the saved run. Tap RETRY.');
+      if (mounted && attempt == _attempt) setState(() => _error = 'Could not load the saved run. Tap RETRY.');
     });
   }
 
   @override
   void dispose() {
+    _attempt++;
+    _waiting?.cancel();
+    _browserImage?.dispose();
     _subscription?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(RunSummaryActions oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.runId != widget.runId || oldWidget.ownerUid != widget.ownerUid) {
+      _browserImage?.dispose(); _browserImage = null;
+      _png = null; _error = null; _preparing = false; _rendering = null;
+      _subscription?.cancel();
+      _listen();
+    }
   }
 
   Future<void> _export(bool share) async {
@@ -75,6 +110,12 @@ class _RunSummaryActionsState extends State<RunSummaryActions> {
     final origin = box == null ? const Rect.fromLTWH(0, 0, 1, 1) : box.localToGlobal(Offset.zero) & box.size;
     setState(() => _busy = true);
     try {
+      final browser = _browserImage;
+      if (browser != null) {
+        final message = share ? await browser.share() : browser.save();
+        if (mounted) blockSnack(context, message);
+        return;
+      }
       final result = await (share
           ? RunSummaryExportService.share(png, _name, origin)
           : RunSummaryExportService.save(png, _name));
@@ -109,6 +150,10 @@ class _RunSummaryActionsState extends State<RunSummaryActions> {
         const SizedBox(width: 8),
         Expanded(child: _button('Save Image', Icons.download, ready ? () => _export(false) : null)),
       ]),
+      if (_browserImage != null) TextButton(onPressed: _busy ? null : () {
+        if (FirebaseAuth.instance.currentUser?.uid != widget.ownerUid) return;
+        blockSnack(context, _browserImage!.open());
+      }, child: const Text('Open Image')),
       if (!ready && !_busy) ...[
         const SizedBox(height: 4),
         Text(_error ?? (_preparing ? 'Preparing image...' :
@@ -116,6 +161,7 @@ class _RunSummaryActionsState extends State<RunSummaryActions> {
           textAlign: TextAlign.center, style: const TextStyle(fontSize: 11, color: Colors.black)),
         if (_error != null) TextButton(onPressed: () {
           setState(() => _error = null);
+          _preparing = false;
           _listen();
         }, child: const Text('RETRY')),
       ],

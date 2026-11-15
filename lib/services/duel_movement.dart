@@ -17,12 +17,24 @@ class DuelMovement {
   double _gap = 0;
   bool _jumpAnchorUsed = false;
   bool invalid = false;
+  DateTime? _firstObserved;
+  int _validFixes = 0;
   final List<Map<String, dynamic>> _windows = [], _jumps = [];
 
   Map<String, dynamic> get evidence => {
-    'invalid': invalid, if (_last != null) 'observed_at': Timestamp.fromDate(_last!.at), 'windows': [for (final w in _windows) {...w}],
+    'invalid': invalid, if (_last != null) 'observed_at': Timestamp.fromDate(_last!.at),
+    if (_firstObserved != null) 'first_at': Timestamp.fromDate(_firstObserved!),
+    'fix_count': _validFixes, 'windows': [for (final w in _windows) {...w}],
     'jumps': [for (final j in _jumps) {...j}],
   };
+
+  bool covers(DateTime start, DateTime end) => _validFixes >= 3 &&
+      _firstObserved != null && _last != null &&
+      !_firstObserved!.isBefore(start) &&
+      !_firstObserved!.isAfter(start.add(const Duration(seconds: 30))) &&
+      !_last!.at.isBefore(end.subtract(const Duration(seconds: 15))) &&
+      !_last!.at.isAfter(end) &&
+      _last!.at.difference(_firstObserved!).inSeconds >= 10;
 
   void _resetWindow() { _windowStart = null; _fixes = 0; _gap = 0; _windows.clear(); }
 
@@ -45,6 +57,8 @@ class DuelMovement {
     }
     final previous = _last;
     if (previous != null && !fix.at.isAfter(previous.at)) return;
+    _firstObserved ??= fix.at;
+    _validFixes++;
     if (previous != null) {
       final dt = fix.at.difference(previous.at).inMilliseconds / 1000.0;
       final meters = math.max(0.0, _distance(previous, fix) - previous.accuracy - fix.accuracy);

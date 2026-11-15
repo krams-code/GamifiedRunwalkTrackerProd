@@ -6,13 +6,14 @@ import 'package:flutter/material.dart';
 import '../models/duel_policy.dart';
 import 'friends_service.dart';
 import 'presence.dart';
+import 'duel_session.dart';
 
 /// One account/session listener across all routes. Slots retain the last duel
 /// reference after release, so a reconnecting client can read its final result.
 class DuelCoordinator with WidgetsBindingObserver, ChangeNotifier {
   DuelCoordinator._();
   static final I = DuelCoordinator._();
-  final String session = '${DateTime.now().microsecondsSinceEpoch}_${Random.secure().nextInt(1 << 30)}';
+  String session = '${DateTime.now().microsecondsSinceEpoch}_${Random.secure().nextInt(1 << 30)}';
   String? uid, challengeId, roomId;
   Map<String, dynamic>? challenge, slot;
   bool soloBusy = false;
@@ -29,16 +30,24 @@ class DuelCoordinator with WidgetsBindingObserver, ChangeNotifier {
     if (uid == user) return;
     stop();
     uid = user;
+    try {
+      session = await restoreDuelSession(user, session).timeout(const Duration(seconds: 5));
+    } catch (e) {
+      debugPrint('Activity session restoration unavailable: $e');
+    }
+    if (uid != user) return;
     foreground = ![AppLifecycleState.hidden, AppLifecycleState.paused, AppLifecycleState.detached]
         .contains(WidgetsBinding.instance.lifecycleState);
     WidgetsBinding.instance.addObserver(this);
     _authSub = FirebaseAuth.instance.authStateChanges().listen((u) {
       if (u?.uid != uid) stop();
     });
-    _slotSub = FriendsService.activity(user).snapshots().listen((s) {
+    _slotSub = FriendsService.activity(user).snapshots(includeMetadataChanges: true).listen((s) {
       if (uid != user) return;
+      if (s.metadata.hasPendingWrites || s.metadata.isFromCache) return;
       slot = s.data();
-      final next = slot?['challenge_id'] as String?;
+      final raw = slot?['challenge_id'] as String?;
+      final next = raw == null || raw.isEmpty ? null : raw;
       if (next != challengeId) {
         _duelSub?.cancel();
         challengeId = next; challenge = null;
@@ -60,6 +69,7 @@ class DuelCoordinator with WidgetsBindingObserver, ChangeNotifier {
     WidgetsBinding.instance.removeObserver(this);
     uid = null; challengeId = null; challenge = null; slot = null;
     soloBusy = false; roomId = null; _working = false; _releasingSolo = false;
+    _seconds = 0;
     notifyListeners();
   }
 
@@ -73,7 +83,7 @@ class DuelCoordinator with WidgetsBindingObserver, ChangeNotifier {
         if (DuelPolicy.expired(challenge!, DateTime.now()) || challenge!['protocol'] != DuelPolicy.version || _seconds % 30 == 0) {
           await FriendsService.expireChallenge(id);
         }
-      } else if (id != null && roomId == null && slot?['kind'] == 'duel') {
+      } else if (id != null && challenge != null && roomId == null && slot?['kind'] == 'duel') {
         await releaseRoom(id);
       }
       if (_releasingSolo) await endSolo();

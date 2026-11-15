@@ -8,7 +8,7 @@ class LegalDocument {
 abstract final class LegalDocuments {
   // Supply the actual release date when preparing the release build.
   static const effectiveDate = String.fromEnvironment('LEGAL_RELEASE_DATE',
-      defaultValue: 'On the release date of this version');
+      defaultValue: 'November 15, 2026');
 
   static const terms = LegalDocument('Terms of Service', '1.0', '''
 Who operates HakbangHero

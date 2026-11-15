@@ -25,11 +25,15 @@ class UserDoc {
       StreamController<DocumentSnapshot<Map<String, dynamic>>>.broadcast();
 
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _sub;
+  StreamSubscription<User?>? _authSub;
   String? _uid;
   DocumentSnapshot<Map<String, dynamic>>? _last;
 
   void _ensure() {
     final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid != null) {
+      _authSub ??= FirebaseAuth.instance.authStateChanges().listen((_) => _ensure());
+    }
     if (uid == _uid && (_sub != null || uid == null)) return;
     _sub?.cancel();
     _sub = null;
@@ -42,15 +46,18 @@ class UserDoc {
     _sub = FirebaseFirestore.instance
         .collection('users')
         .doc(uid)
-        .snapshots()
+        .snapshots(includeMetadataChanges: true)
         .listen(
       (s) {
+        if (_uid != uid) return;
         _last = s;
         // girl / boy SPROUT art for this player, before anyone rebuilds
         HeroLook.meGirl = isFemaleGender(s.data()?['gender'] as String?);
         _ctrl.add(s);
       },
-      onError: _ctrl.addError,
+      onError: (Object error, StackTrace stack) {
+        if (_uid == uid) _ctrl.addError(error, stack);
+      },
     );
   }
 
@@ -93,9 +100,9 @@ class _ReplayLatest extends Stream<DocumentSnapshot<Map<String, dynamic>>> {
     final out = StreamController<DocumentSnapshot<Map<String, dynamic>>>();
     StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? live;
     out.onListen = () {
+      live = _owner._ctrl.stream.listen(out.add, onError: out.addError);
       final last = _owner._last;
       if (last != null) out.add(last);
-      live = _owner._ctrl.stream.listen(out.add, onError: out.addError);
     };
     out.onCancel = () => live?.cancel();
     return out.stream.listen(onData,

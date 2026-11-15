@@ -22,7 +22,8 @@ import '../auth/legal_consent_screen.dart';
 
 class CharacterCreationScreen extends StatefulWidget {
   final bool isEditMode; // true when opened from Profile to tweak appearance
-  const CharacterCreationScreen({super.key, this.isEditMode = false});
+  final VoidCallback? onCompleted;
+  const CharacterCreationScreen({super.key, this.isEditMode = false, this.onCompleted});
 
   @override
   State<CharacterCreationScreen> createState() => _CharacterCreationScreenState();
@@ -259,7 +260,7 @@ class _CharacterCreationScreenState extends State<CharacterCreationScreen> {
       if (!widget.isEditMode && _existing['character_created'] == true &&
           !PrivateData.profileComplete(_existing)) {
         await FirebaseFirestore.instance.collection('users').doc(uid)
-            .update({'character_created': false});
+            .update({'character_created': false}).timeout(const Duration(seconds: 15));
       }
       final fields = profile.toFirestore();
       if (_repairing && !widget.isEditMode) {
@@ -303,24 +304,27 @@ class _CharacterCreationScreenState extends State<CharacterCreationScreen> {
           TutorialProgress.firstRunField: false,
         },
       });
-      await batch.commit();
+      await batch.commit().timeout(const Duration(seconds: 30));
       if (!widget.isEditMode && body['weight_kg'] is num) {
         // first point of the weight chart (best effort)
         FirebaseFirestore.instance
             .collection('users')
             .doc(uid)
             .collection('weight_checkins')
-            .add({
+            .doc('initial')
+            .set({
           'at': FieldValue.serverTimestamp(),
           'height_cm': body['height_cm'],
           'weight_kg': body['weight_kg'],
-        }).catchError((_) => FirebaseFirestore.instance.collection('users').doc(uid));
+         }).catchError((Object _) {});
       }
 
       if (!mounted) return;
 
       if (widget.isEditMode) {
         Navigator.of(context).pop();
+      } else if (widget.onCompleted != null) {
+        widget.onCompleted!();
       } else {
         Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(builder: (_) => const MainShell()),

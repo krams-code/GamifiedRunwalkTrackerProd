@@ -9,6 +9,7 @@ import 'package:flutter/widgets.dart';
 import '../models/body_composition.dart';
 import '../models/character_profile.dart';
 import '../services/private_data.dart';
+import 'user_doc.dart';
 
 /// What happened when the player locked in a check-in.
 class EvolutionResult {
@@ -104,13 +105,12 @@ class EvolutionState {
       composition.value = BodyCompositionState.normal;
       return;
     }
-    _docSub = FirebaseFirestore.instance
-        .collection('users')
-        .doc(user.uid)
-        .snapshots()
-        .listen(_onDoc, onError: (Object _) {});
+    _docSub = UserDoc.instance.stream.listen((s) {
+      if (_uid == user.uid && s.id == user.uid) _onDoc(s);
+    }, onError: (Object _) {});
     // height / weight live in the owner-only private doc
     _privSub = PrivateData.ref(user.uid).snapshots().listen((s) {
+      if (_uid != user.uid) return;
       _priv = s.data() ?? const <String, dynamic>{};
       _merge();
     }, onError: (Object _) {});

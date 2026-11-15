@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../utils/weekly.dart';
 import 'run_saver.dart';
@@ -246,8 +247,21 @@ class FriendsService {
   static DocumentReference<Map<String, dynamic>> cooldown(String from, String to) =>
       _db.collection('duel_cooldowns').doc(from).collection('recipients').doc(to);
 
-  static String duelError(Object e) => e is DuelUnavailable ? e.message :
-      'Could not update the duel. Check your connection and try again.';
+  static String duelError(Object e) {
+    if (e is DuelUnavailable) return e.message;
+    // Keep the actual code and stack in diagnostics, never account data in UI.
+    debugPrint('Duel operation failed: $e');
+    if (e is FirebaseException) {
+      return switch (e.code) {
+        'permission-denied' => 'The server rejected this duel operation (permission-denied). Reopen Friends and retry.',
+        'unavailable' => 'The duel server is unavailable. Reconnect and retry.',
+        'unauthenticated' => 'Please sign in again to update this duel.',
+        'failed-precondition' => 'Your duel state changed. Reopen Friends and retry (failed-precondition).',
+        _ => 'Duel update is not confirmed (${e.code}). Reconnect and retry.',
+      };
+    }
+    return 'Duel update is not confirmed. Check your connection and retry.';
+  }
 
   static bool _leased(Map<String, dynamic>? slot) {
     final at = slot?['updated_at'];
@@ -279,13 +293,37 @@ class FriendsService {
   }
 
   /// Reserve both invitation slots in the same commit as the invitation.
+  static Future<void> _inviteTransaction(
+    Future<void> Function(Transaction) action,
+  ) async {
+    Object? callbackError;
+    StackTrace? callbackStack;
+    try {
+      await _db.runTransaction<void>((txn) async {
+        // Web's Promise bridge wraps callback exceptions as JavaScript Errors.
+        // Retain the original exception before it crosses that bridge.
+        callbackError = null;
+        callbackStack = null;
+        try {
+          await action(txn);
+        } catch (error, stack) {
+          callbackError = error;
+          callbackStack = stack;
+          rethrow;
+        }
+      });
+    } catch (error, stack) {
+      Error.throwWithStackTrace(callbackError ?? error, callbackStack ?? stack);
+    }
+  }
+
   static Future<DocumentReference<Map<String, dynamic>>> sendChallenge({
     required String me, required String myName, required String otherUid,
     required String otherName, required int km, required String session,
   }) async {
     if (me == otherUid || !rewardFor.containsKey(km)) throw const DuelUnavailable('Choose an eligible friend and distance.');
     final ref = challenges.doc();
-    await _db.runTransaction((txn) async {
+    await _inviteTransaction((txn) async {
       final wait = (await txn.get(cooldown(me, otherUid))).data()?['declined_at'];
       if (wait is Timestamp) {
         final remaining = wait.toDate().add(const Duration(seconds: DuelPolicy.cooldownSeconds)).difference(DateTime.now());
@@ -298,16 +336,22 @@ class FriendsService {
         final p = await txn.get(_db.collection('presence').doc(uid));
         final a = await txn.get(activity(uid));
         if (!DuelPolicy.fresh(p.data(), DateTime.now()) || !_leased(a.data())) {
-          throw const DuelUnavailable('This player is offline or their availability could not be confirmed.');
+          throw DuelUnavailable(uid == me
+              ? 'Your online activity is not ready. Reopen the app and retry.'
+              : 'Your friend’s online activity is not ready. Ask them to reopen the app.');
         }
-        if (a.data()?['kind'] != 'available') throw const DuelUnavailable(DuelPolicy.busyMessage);
+        if (a.data()?['kind'] != 'available') {
+          throw DuelUnavailable(uid == me
+              ? 'Your account is still marked as being in an activity. Finish or leave it before inviting.'
+              : DuelPolicy.busyMessage);
+        }
         if (uid == me && a.data()?['session_id'] != session) {
           throw const DuelUnavailable('Another session is using this account.');
         }
         slots.add(a);
       }
       txn.set(ref, {
-        'protocol': DuelPolicy.version, 'participants': [me, otherUid],
+        'protocol': DuelPolicy.version, 'reward_protocol': 2, 'participants': [me, otherUid],
         'from': me, 'to': otherUid, 'from_name': myName, 'to_name': otherName,
         'distance_km': km, 'reward': rewardFor[km], 'status': 'pending',
         'ready': {me: false, otherUid: false}, 'progress': {me: 0.0, otherUid: 0.0},
@@ -398,12 +442,19 @@ class FriendsService {
       String me, double km, {required bool finished}) async {
     final d = ch.data()!;
     final ud = (await txn.get(user(me))).data() ?? <String, dynamic>{};
+    final receipt = _db.collection('duel_reward_receipts').doc(ch.id);
+    if ((await txn.get(receipt)).exists) {
+      throw StateError('This duel already has a reward receipt.');
+    }
     final day = RunSaver.coinDay();
     final paidToday = (ud['duel_prize_day'] as num?)?.toInt() == day
         ? ((ud['duel_prizes_today'] as num?)?.toInt() ?? 0) : 0;
     final prize = paidToday >= duelPrizesPerDay ? 0 : RunSaver.capToday(ud, prizeFor(d, km, finished: finished));
     txn.update(ch.reference, {'status': 'done', 'winner': me, 'prize': prize,
+      'reward_receipt': ch.id,
       'finished_at': FieldValue.serverTimestamp(), 'validated_at': FieldValue.serverTimestamp()});
+    txn.set(receipt, {'challenge_id': ch.id, 'participants': d['participants'],
+      'winner': me, 'prize': prize, 'validated_at': FieldValue.serverTimestamp()});
     if (prize > 0) {
       txn.update(user(me), {'coins': FieldValue.increment(prize), ...RunSaver.coinsTodayFields(ud, prize),
         'duel_prize_day': day, 'duel_prizes_today': paidToday + 1, 'last_duel_id': ch.id});

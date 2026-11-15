@@ -23,7 +23,7 @@ abstract final class Usernames {
     final k = key(name);
     if (k.isEmpty) return false;
     try {
-      final d = await _col.doc(k).get();
+      final d = await _col.doc(k).get().timeout(const Duration(seconds: 8));
       return d.exists && d.data()?['uid'] != myUid;
     } catch (_) {
       return false;
@@ -44,7 +44,7 @@ abstract final class Usernames {
       });
     } catch (e) {
       debugPrint('username claim: $e');
-      return false;
+      rethrow;
     }
   }
 
@@ -57,7 +57,7 @@ abstract final class Usernames {
       final cand = '$clean${1000 + rng.nextInt(9000)}';
       if (await claim(uid, cand)) return cand;
     }
-    return clean;
+    throw StateError('Could not reserve a hero name. Please choose another.');
   }
 
   /// Accounts made before names were unique: reserve their current name if

@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../services/friends_service.dart';
+import '../../services/chat_inbox.dart';
 import '../../services/presence.dart';
 import '../../services/duel_coordinator.dart';
 import '../../models/duel_policy.dart';
@@ -47,7 +48,6 @@ class _FriendsScreenState extends State<FriendsScreen> {
   List<_Doc> get _incoming =>
       _incomingRaw.where((d) => !_blocked.contains(d.data()['from'])).toList();
   List<_Doc> _challenges = [];
-  Map<String, Map<String, dynamic>> _chats = {}; // otherUid -> chat doc
   final Map<String, Future<Map<String, dynamic>?>> _profiles = {};
   final List<StreamSubscription> _subs = [];
 
@@ -56,6 +56,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
     super.initState();
     _me = FirebaseAuth.instance.currentUser?.uid ?? '';
     if (_me.isEmpty) return;
+    ChatInbox.I.addListener(_inboxChanged);
 
     FriendsService.user(_me).get().then((s) {
       if (!mounted) return;
@@ -83,23 +84,15 @@ class _FriendsScreenState extends State<FriendsScreen> {
         .listen((s) {
       if (mounted) setState(() => _challenges = s.docs);
     }, onError: (_) {}));
-    _subs.add(FriendsService.chats
-        .where('members', arrayContains: _me)
-        .snapshots()
-        .listen((s) {
-      final m = <String, Map<String, dynamic>>{};
-      for (final d in s.docs) {
-        final members = (d.data()['members'] as List?)?.whereType<String>() ?? const [];
-        for (final u in members) {
-          if (u != _me) m[u] = d.data();
-        }
-      }
-      if (mounted) setState(() => _chats = m);
-    }, onError: (_) {}));
+  }
+
+  void _inboxChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    ChatInbox.I.removeListener(_inboxChanged);
     for (final s in _subs) {
       s.cancel();
     }
@@ -122,13 +115,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
   }
 
   bool _unread(String otherUid) {
-    final c = _chats[otherUid];
-    if (c == null) return false;
-    if (c['last_from'] == _me || c['last_from'] == null) return false;
-    final last = (c['last_at'] as Timestamp?)?.toDate();
-    if (last == null) return false;
-    final read = ((c['read'] as Map?)?[_me] as Timestamp?)?.toDate();
-    return read == null || last.isAfter(read);
+    return ChatInbox.I.unread(otherUid) > 0;
   }
 
   /// Duels that need me: invites to answer + rooms I can join.
@@ -364,7 +351,8 @@ class _FriendsScreenState extends State<FriendsScreen> {
     PresenceStatus st = PresenceStatus.offline;
     String? seen;
     try {
-      final snap = await Presence.doc(uid).get(const GetOptions(source: Source.server));
+      final snap = await Presence.doc(uid).get(const GetOptions(source: Source.server))
+          .timeout(const Duration(seconds: 8));
       st = Presence.statusOf(snap.data());
       seen = Presence.lastSeen(snap.data());
     } catch (_) {}
