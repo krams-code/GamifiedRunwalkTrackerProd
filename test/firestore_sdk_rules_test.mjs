@@ -159,3 +159,49 @@ test('SDK completed run commits history, rewards and leaderboard fields together
   const data = (await sdk.getDoc(sdk.doc(db, `users/${p.a}`))).data();
   assert.equal(data.xp, 239); assert.equal(data.coins, 1016); assert.equal(data.week_km, 2);
 });
+
+for (const questKm of [0, 3]) {
+test(`SDK queued 2 km stage syncs rewards and distance from ${questKm} quest km exactly once`, local, async () => {
+  const p = await pair('validating', { daily_progress_km: questKm });
+  const db = p.db(p.a), id = `stage-${serial}`;
+  const ended = sdk.Timestamp.fromMillis(Date.now() - 1000);
+  const started = sdk.Timestamp.fromMillis(ended.toMillis() - 1200000);
+  const day = Math.floor((Date.now() + 28800000) / 86400000);
+  const coins = 170 + (questKm == 3 ? 750 : 0);
+  const pending = sdk.doc(db, `users/${p.a}/pending_runs/${id}`);
+  await assertSucceeds(sdk.setDoc(pending, { uid: p.a, id, modeId: 'stage_novice' }));
+  const save = (distance = 2) => sdk.runTransaction(db, async txn => {
+    const activity = sdk.doc(db, `users/${p.a}/activities/${id}`);
+    const user = sdk.doc(db, `users/${p.a}`);
+    if ((await txn.get(activity)).exists()) return;
+    await txn.get(user);
+    txn.set(activity, { type: 'run', mode: 'stage_novice', distanceKm: distance,
+      durationSeconds: 1200, activeSeconds: 1200, startTime: started, endTime: ended,
+      xpEarned: 299, coinsEarned: 20, awardedXp: 299, awardedCoins: coins,
+      reward_mult: 1, stage_result: 'STAGE CLEARED!', routePoints: [] });
+    txn.update(user, { total_km: sdk.increment(distance), total_sessions: sdk.increment(1),
+      xp: sdk.increment(299), coins: sdk.increment(coins), last_run_id: id, last_run_end: ended,
+      coins_today: coins, coins_today_day: day, 'badge_stats.longest_run_km': 2,
+      daily_progress_date: '2026-11-15', daily_progress_km: questKm + 2,
+      daily_quests_claimed: questKm == 3 ? { distance_warrior: true } : {},
+      last_run_at: sdk.serverTimestamp(), week_key: 'stage-week', week_km: 2,
+      month_key: 'stage-month', month_km: 2,
+      stage_records: { stage_novice: { stars: 1, best_secs: 1200, clears: 1 } } });
+  });
+  // The optimized path must still refuse a stage clear without its distance.
+  await assertFails(save(1.98));
+  assert.equal((await sdk.getDoc(pending)).exists(), true);
+  assert.equal((await sdk.getDoc(sdk.doc(db, `users/${p.a}`))).data().xp, 0);
+  await assertSucceeds(save());
+  await assertSucceeds(save());
+  await assertSucceeds(sdk.deleteDoc(pending));
+  const saved = (await sdk.getDoc(sdk.doc(db, `users/${p.a}`))).data();
+  assert.equal(saved.daily_progress_km, questKm + 2);
+  assert.equal(saved.daily_quests_claimed.distance_warrior === true, questKm === 3);
+  assert.equal(saved.total_km, 2);
+  assert.equal(saved.xp, 299);
+  assert.equal(saved.week_km, 2);
+  assert.equal(saved.month_km, 2);
+  assert.equal(saved.coins, 1000 + coins);
+});
+}

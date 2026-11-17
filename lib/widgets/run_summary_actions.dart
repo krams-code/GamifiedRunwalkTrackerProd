@@ -15,7 +15,12 @@ class RunSummaryActions extends StatefulWidget {
   final String? ownerUid;
   final String? runId;
   final ValueChanged<RunSummaryExport>? onConfirmed;
-  const RunSummaryActions({super.key, this.ownerUid, this.runId, this.onConfirmed});
+  @visibleForTesting
+  final Stream<DocumentSnapshot<Map<String, dynamic>>> Function()? activityStream;
+  @visibleForTesting
+  final Future<Uint8List> Function(RunSummaryExport)? renderImage;
+  const RunSummaryActions({super.key, this.ownerUid, this.runId, this.onConfirmed,
+    this.activityStream, this.renderImage});
 
   @override
   State<RunSummaryActions> createState() => _RunSummaryActionsState();
@@ -42,25 +47,29 @@ class _RunSummaryActionsState extends State<RunSummaryActions> {
   void _listen() {
     final attempt = ++_attempt;
     _waiting?.cancel();
+    _subscription?.cancel();
+    _preparing = false;
+    _rendering = null;
     final uid = widget.ownerUid, id = widget.runId;
     if (uid == null || id == null) return;
-    _subscription?.cancel();
     _waiting = Timer(const Duration(seconds: 20), () {
       if (mounted && attempt == _attempt && _png == null) {
         setState(() => _error = 'The run is not confirmed yet. Reconnect and tap RETRY.');
       }
     });
-    _subscription = FirebaseFirestore.instance.collection('users').doc(uid)
-        .collection('activities').doc(id).snapshots(includeMetadataChanges: true).listen((doc) async {
+    final snapshots = widget.activityStream?.call() ?? FirebaseFirestore.instance.collection('users').doc(uid)
+        .collection('activities').doc(id).snapshots(includeMetadataChanges: true);
+    _subscription = snapshots.listen((doc) async {
       if (!mounted || attempt != _attempt || _png != null || _preparing || !doc.exists ||
           doc.metadata.hasPendingWrites || doc.metadata.isFromCache) {
         return;
       }
+      _waiting?.cancel();
       setState(() { _preparing = true; _error = null; });
       try {
         final summary = RunSummaryExportService.confirmed(doc);
         widget.onConfirmed?.call(summary);
-        _rendering ??= RunSummaryExportService.render(summary);
+        _rendering ??= (widget.renderImage ?? RunSummaryExportService.render)(summary);
         final png = await _rendering!.timeout(const Duration(seconds: 20));
         if (mounted && attempt == _attempt) {
           _waiting?.cancel();
@@ -69,7 +78,10 @@ class _RunSummaryActionsState extends State<RunSummaryActions> {
           setState(() { _png = png; _name = summary.fileName; _error = null; });
         }
       } catch (e) {
-        if (attempt == _attempt && e is! TimeoutException) _rendering = null;
+        // A timed-out renderer may never finish. RETRY must start a new
+        // render instead of waiting on that same stalled future forever.
+        if (attempt == _attempt) _rendering = null;
+        debugPrint('Run image preparation failed: $e');
         if (mounted && attempt == _attempt) setState(() => _error = 'Could not prepare the saved run image. Tap RETRY.');
       } finally {
         if (mounted && attempt == _attempt) setState(() => _preparing = false);
@@ -101,7 +113,19 @@ class _RunSummaryActionsState extends State<RunSummaryActions> {
 
   Future<void> _export(bool share) async {
     final png = _png;
-    if (png == null || _busy) return;
+    if (_busy) return;
+    if (png == null) {
+      if (_error != null) {
+        setState(() => _error = null);
+        _listen();
+        blockSnack(context, 'Retrying image preparation. Tap again when it is ready.');
+      } else {
+        blockSnack(context, _preparing ? 'Preparing your run image. Please try again shortly.' :
+          widget.runId == null ? 'Only saved runs can be exported.' :
+          'Waiting for this run to sync. Use SYNC NOW, then try again.');
+      }
+      return;
+    }
     if (FirebaseAuth.instance.currentUser?.uid != widget.ownerUid) {
       blockSnack(context, 'Sign in to the account that recorded this run.');
       return;
@@ -131,7 +155,10 @@ class _RunSummaryActionsState extends State<RunSummaryActions> {
     }
   }
 
-  Widget _button(String label, IconData icon, VoidCallback? onTap) => PressBlock(
+  Widget _button(String label, IconData icon, VoidCallback? onTap) => Semantics(
+    label: label, button: true, enabled: onTap != null, onTap: onTap,
+    excludeSemantics: true,
+    child: PressBlock(
     color: Rb.blue, edge: Rb.blueEdge, depth: 4, radius: 12,
     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 14), onTap: onTap,
     child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -139,16 +166,17 @@ class _RunSummaryActionsState extends State<RunSummaryActions> {
       Flexible(child: Text(label, textAlign: TextAlign.center,
         style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w900))),
     ]),
-  );
+  ));
 
   @override
   Widget build(BuildContext context) {
     final ready = _png != null && !_busy;
+    final canTry = widget.ownerUid != null && widget.runId != null && !_busy;
     return Column(mainAxisSize: MainAxisSize.min, children: [
       Row(children: [
-        Expanded(child: _button('Share', Icons.share, ready ? () => _export(true) : null)),
+        Expanded(child: _button('Share', Icons.share, canTry ? () => _export(true) : null)),
         const SizedBox(width: 8),
-        Expanded(child: _button('Save Image', Icons.download, ready ? () => _export(false) : null)),
+        Expanded(child: _button('Save Image', Icons.download, canTry ? () => _export(false) : null)),
       ]),
       if (_browserImage != null) TextButton(onPressed: _busy ? null : () {
         if (FirebaseAuth.instance.currentUser?.uid != widget.ownerUid) return;

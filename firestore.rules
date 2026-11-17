@@ -96,12 +96,15 @@ service cloud.firestore {
     // stage_records may change only for the mode of THIS run, and only if the
     // run record really cleared it (target distance inside the clock).
     function stageProof(a) {
+      // Build the stage target map once: repeated catalog evaluation can push
+      // an otherwise valid stage save past Firestore's 1,000-expression limit.
+      let target = stageTarget(a.mode);
       return a.get('stage_result', '') == 'STAGE CLEARED!'
         && request.resource.data.stage_records
              .diff(resource.data.get('stage_records', {}))
              .affectedKeys().hasOnly([a.mode])
-        && a.distanceKm >= stageTarget(a.mode)[0] - 0.01
-        && a.durationSeconds <= stageTarget(a.mode)[1] + 2;
+        && a.distanceKm >= target[0] - 0.01
+        && a.durationSeconds <= target[1] + 2;
     }
 
     // (runOk itself is enforced by economyOk whenever a run is committed)
@@ -407,11 +410,18 @@ service cloud.firestore {
     // Finished runs never change inventory or profile fields. Keep them out of
     // the shop/catalog alternatives, which exceed the rule expression budget.
     function runSaveOk(uid) {
+      // The caller already established runCommit(). Reuse the activity and
+      // avoid repeating runCommit/runChange for every stage proof.
+      let id = nd('last_run_id', '');
+      let path = actPath(uid, id);
+      let activity = getAfter(path).data;
       return keys().hasOnly(['total_km', 'total_sessions', 'last_run_id', 'last_run_end', 'badge_stats',
           'xp', 'coins', 'coins_today', 'coins_today_day', 'loot_chests', 'daily_progress_km',
           'daily_progress_date', 'daily_quests_claimed', 'last_run_at', 'week_key', 'week_km',
           'month_key', 'month_km', 'stage_records', 'interval_runs', 'interval_best_rounds', 'interval_best_fast_pace_s'])
-        && nd('coins', 0) >= 0 && runOk(uid) && stageOk(uid);
+        && nd('coins', 0) >= 0 && existsAfter(path) && !exists(path)
+        && runAmountsOk(activity)
+        && (!changed('stage_records') || stageProof(activity));
     }
     function duelRewardSaveOk(uid) {
       return keys().hasOnly(['coins', 'coins_today', 'coins_today_day', 'duel_prize_day',
